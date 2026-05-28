@@ -7,5 +7,12 @@ dist/
 wheels/
 *.egg-info
 
+# Generated benchmark/debug artifacts
+outputs/local_traces/
+outputs/local_traces_smoke/
+data/external/
+
 # Virtual environments
 .venv
+.env
+outputs/

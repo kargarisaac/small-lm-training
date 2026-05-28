@@ -26,7 +26,7 @@
 
   <rect class="bg" x="0" y="0" width="1400" height="820"/>
   <text class="title" x="60" y="56">How a solved teacher trajectory becomes SFT training rows</text>
-  <text class="text" x="60" y="84">One BFCL task can contain multiple user turns. Each teacher action message becomes one training example.</text>
+  <text class="text" x="60" y="84">One τ³-Bench retail task can contain multiple user turns. Each teacher action message becomes one training example.</text>
   <text class="small" x="60" y="105">If one action message contains multiple tool calls, those calls stay together in the target.</text>
 
   <rect class="panel" x="50" y="120" width="580" height="620"/>
