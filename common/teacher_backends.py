@@ -18,9 +18,26 @@ __all__ = [
 
 
 def teacher_runtime_is_configured(config: TeacherConfig) -> bool:
-    if config.provider not in {"mlx_server", "mlx_raw_server", "ollama_raw", "vllm_raw"}:
+    if config.provider not in {"mlx_server", "mlx_raw_server", "ollama_raw", "vllm_raw", "chatgpt_raw"}:
         print(f"Unsupported teacher provider: {config.provider!r}")
         return False
+
+    if config.provider == "chatgpt_raw":
+        try:
+            with urllib.request.urlopen(f"{_chatgpt_api_base(config)}/models", timeout=10) as response:
+                if response.status != 200:
+                    print(f"ChatGPT shim health check returned HTTP {response.status}.")
+                    return False
+                json.loads(response.read().decode("utf-8"))
+        except urllib.error.URLError as error:
+            print(f"Could not reach the ChatGPT subscription shim at {config.server_base_url}.")
+            print("Start the shim from the notebook, then rerun this cell.")
+            print("Error:", error)
+            return False
+        except json.JSONDecodeError as error:
+            print(f"ChatGPT shim models endpoint returned invalid JSON: {error}")
+            return False
+        return True
 
     if config.provider == "vllm_raw":
         try:
@@ -110,14 +127,31 @@ def teacher_runtime_is_configured(config: TeacherConfig) -> bool:
 
 def teacher_server_health(config: TeacherConfig) -> dict[str, Any] | None:
     try:
-        if config.provider == "ollama_raw":
+        if config.provider == "chatgpt_raw":
+            path = "/models"
+            base_url = _chatgpt_api_base(config)
+        elif config.provider == "ollama_raw":
             path = "/api/tags"
+            base_url = config.server_base_url
         elif config.provider == "vllm_raw":
             path = "/v1/models"
+            base_url = config.server_base_url
         else:
             path = "/health"
-        with urllib.request.urlopen(f"{config.server_base_url}{path}", timeout=10) as response:
+            base_url = config.server_base_url
+        with urllib.request.urlopen(f"{base_url}{path}", timeout=10) as response:
             payload = json.loads(response.read().decode("utf-8"))
+        if config.provider == "chatgpt_raw":
+            models = [
+                model.get("id")
+                for model in payload.get("data", [])
+                if isinstance(model, dict) and model.get("id")
+            ]
+            return {
+                "model": config.model_name,
+                "models": models,
+                "raw": payload,
+            }
         if config.provider == "vllm_raw":
             models = [
                 model.get("id")
@@ -200,6 +234,11 @@ def _vllm_request_model_name(config: TeacherConfig) -> str:
     return config.model_name
 
 
+def _chatgpt_api_base(config: TeacherConfig) -> str:
+    base_url = config.server_base_url.rstrip("/")
+    return base_url if base_url.endswith("/v1") else f"{base_url}/v1"
+
+
 def _build_ollama_raw_completion_payload(
     prompt: str,
     config: TeacherConfig,
@@ -236,6 +275,35 @@ def _build_vllm_raw_completion_payload(
     }
     if config.top_k >= 0:
         payload["top_k"] = config.top_k
+    return payload
+
+
+def _build_chatgpt_raw_completion_payload(
+    prompt: str,
+    config: TeacherConfig,
+    max_tokens: int | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "model": config.request_model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are a hosted teacher baseline inside a tool-use benchmark harness. "
+                    "Continue the rendered Qwen tool-use prompt. Return only the assistant "
+                    "completion text. If an action is needed, use the Qwen <tool_call> XML "
+                    "format already shown in the prompt."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        "max_tokens": max_tokens or config.max_new_tokens,
+        "temperature": config.temperature,
+        "top_p": config.top_p,
+        "stream": False,
+    }
+    if config.reasoning_effort:
+        payload["reasoning"] = {"effort": config.reasoning_effort}
     return payload
 
 
@@ -302,6 +370,28 @@ def _request_vllm_raw_completion(payload: dict[str, Any], config: TeacherConfig)
         raise RuntimeError(f"Could not reach vLLM at {config.server_base_url}: {error}") from error
 
 
+def _request_chatgpt_raw_completion(payload: dict[str, Any], config: TeacherConfig) -> dict[str, Any]:
+    endpoint_url = f"{_chatgpt_api_base(config)}/chat/completions"
+    request = urllib.request.Request(
+        url=endpoint_url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=config.request_timeout_seconds) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        try:
+            detail = error.read().decode("utf-8", errors="replace")
+        except Exception as read_error:
+            detail = f"<could not read error body: {read_error}>"
+        raise RuntimeError(f"ChatGPT teacher HTTP {error.code}: {detail}") from error
+    except urllib.error.URLError as error:
+        raise RuntimeError(f"Could not reach ChatGPT shim at {config.server_base_url}: {error}") from error
+
+
 def _record_endpoint_event(
     endpoint_event_sink: Callable[[dict[str, Any]], None] | None,
     event: dict[str, Any],
@@ -333,6 +423,18 @@ def _qwen_text_from_vllm_raw_completion(response_payload: dict[str, Any]) -> str
     if text is None:
         raise RuntimeError(f"vLLM raw teacher choice has no text field: {choices[0]}")
     return str(text)
+
+
+def _qwen_text_from_openai_chat_completion(response_payload: dict[str, Any]) -> str:
+    choices = response_payload.get("choices", [])
+    if not choices:
+        raise RuntimeError(f"OpenAI-compatible chat response has no choices: {response_payload}")
+
+    message = choices[0].get("message", {})
+    content = message.get("content")
+    if content is None:
+        raise RuntimeError(f"OpenAI-compatible chat response has no message content: {choices[0]}")
+    return str(content)
 
 
 def _qwen_text_from_mlx_chat_response(response_payload: dict[str, Any]) -> str:
@@ -551,6 +653,46 @@ def _vllm_raw_completion(
     return _qwen_text_from_vllm_raw_completion(response_payload)
 
 
+def _chatgpt_raw_completion(
+    prompt: str | None,
+    config: TeacherConfig,
+    endpoint_event_sink: Callable[[dict[str, Any]], None] | None = None,
+) -> str:
+    if prompt is None:
+        raise RuntimeError("The ChatGPT teacher provider requires the rendered Qwen prompt.")
+    payload = _build_chatgpt_raw_completion_payload(prompt=prompt, config=config)
+    endpoint_url = f"{_chatgpt_api_base(config)}/chat/completions"
+    started_at = time.time()
+    try:
+        response_payload = _request_chatgpt_raw_completion(payload, config=config)
+    except Exception as error:
+        _record_endpoint_event(
+            endpoint_event_sink,
+            {
+                "provider": config.provider,
+                "endpoint_url": endpoint_url,
+                "status": "error",
+                "elapsed_seconds": round(time.time() - started_at, 3),
+                "request_payload": payload,
+                "error_type": type(error).__name__,
+                "error_message": str(error),
+            },
+        )
+        raise
+    _record_endpoint_event(
+        endpoint_event_sink,
+        {
+            "provider": config.provider,
+            "endpoint_url": endpoint_url,
+            "status": "ok",
+            "elapsed_seconds": round(time.time() - started_at, 3),
+            "request_payload": payload,
+            "response_payload": response_payload,
+        },
+    )
+    return _qwen_text_from_openai_chat_completion(response_payload)
+
+
 def make_teacher_action_generator(config: TeacherConfig) -> Callable[..., str]:
     def generate_teacher_action(
         *,
@@ -577,6 +719,12 @@ def make_teacher_action_generator(config: TeacherConfig) -> Callable[..., str]:
             )
         if config.provider == "vllm_raw":
             return _vllm_raw_completion(
+                prompt=prompt,
+                config=config,
+                endpoint_event_sink=record_call,
+            )
+        if config.provider == "chatgpt_raw":
+            return _chatgpt_raw_completion(
                 prompt=prompt,
                 config=config,
                 endpoint_event_sink=record_call,

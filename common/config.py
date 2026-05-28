@@ -124,6 +124,8 @@ def _default_teacher_server_base_url(provider: str | None = None) -> str:
         return "http://127.0.0.1:11434"
     if provider == "vllm_raw":
         return "http://127.0.0.1:8092"
+    if provider == "chatgpt_raw":
+        return "http://127.0.0.1:8080/v1"
     return "http://127.0.0.1:8080"
 
 
@@ -144,6 +146,7 @@ class TeacherConfig:
     temperature: float = 0.0
     top_p: float = 1.0
     top_k: int = 0
+    reasoning_effort: str | None = os.getenv("TEACHER_REASONING_EFFORT")
     request_timeout_seconds: int = int(os.getenv("TEACHER_REQUEST_TIMEOUT_SECONDS", "180"))
     max_new_tokens: int = int(os.getenv("TEACHER_MAX_NEW_TOKENS", str(MAX_NEW_TOKENS)))
 
@@ -171,6 +174,7 @@ def teacher_config_from_env(
         temperature=float(os.getenv("TEACHER_TEMPERATURE", "0.0")),
         top_p=float(os.getenv("TEACHER_TOP_P", "1.0")),
         top_k=int(os.getenv("TEACHER_TOP_K", "0")),
+        reasoning_effort=os.getenv("TEACHER_REASONING_EFFORT"),
         request_timeout_seconds=int(os.getenv("TEACHER_REQUEST_TIMEOUT_SECONDS", "600")),
         max_new_tokens=int(os.getenv("TEACHER_MAX_NEW_TOKENS", str(MAX_NEW_TOKENS))),
     )
@@ -300,6 +304,7 @@ def _teacher_config_to_dict(config: TeacherConfig) -> dict[str, Any]:
         "temperature": config.temperature,
         "top_p": config.top_p,
         "top_k": config.top_k,
+        "reasoning_effort": config.reasoning_effort,
         "request_timeout_seconds": config.request_timeout_seconds,
         "max_new_tokens": config.max_new_tokens,
     }

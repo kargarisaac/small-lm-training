@@ -27,6 +27,7 @@ def _start_chatgpt_subscription_shim(
     host: str = "127.0.0.1",
     port: int = 0,
     default_model: str,
+    api_key: str = "local-shim",
 ) -> Any:
     """Start the local OpenAI-compatible ChatGPT subscription shim."""
 
@@ -35,7 +36,13 @@ def _start_chatgpt_subscription_shim(
     _configure_litellm_for_notebooks()
     from .chatgpt_subscription_shim import ChatGPTSubscriptionShimServer  # noqa: PLC0415
 
-    shim = ChatGPTSubscriptionShimServer(host=host, port=port, default_model=default_model)
+    shim = ChatGPTSubscriptionShimServer(
+        host=host,
+        port=port,
+        default_model=default_model,
+        install_openai_env=True,
+        openai_env_api_key=api_key,
+    )
     shim.__enter__()
     return shim
 
@@ -62,6 +69,7 @@ def _chatgpt_subscription_user_simulator_args(
 ) -> dict[str, Any]:
     return {
         "api_base": base_url,
+        "base_url": base_url,
         "api_key": api_key,
         "temperature": temperature,
         "num_retries": num_retries,
@@ -82,13 +90,15 @@ def start_tau_bench_user_simulator_from_env(
 
     model = required_env("TAU_BENCH_USER_SIMULATOR_LLM")
     shim_model = _chatgpt_subscription_model_from_user_simulator(model)
+    shim_api_key = os.getenv("TAU_BENCH_CHATGPT_SHIM_API_KEY", "local-shim")
     shim = _start_chatgpt_subscription_shim(
         port=int(os.getenv("TAU_BENCH_CHATGPT_SHIM_PORT", "0")),
         default_model=shim_model,
+        api_key=shim_api_key,
     )
     args = _chatgpt_subscription_user_simulator_args(
         base_url=shim.base_url,
-        api_key=os.getenv("TAU_BENCH_CHATGPT_SHIM_API_KEY", "local-shim"),
+        api_key=shim_api_key,
         temperature=0.0,
         num_retries=6,
         timeout=300,
