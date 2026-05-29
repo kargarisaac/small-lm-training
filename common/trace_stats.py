@@ -41,7 +41,8 @@ def _resolve_tau_bench_eval_result_files(
             output_dir
             / f"{student_slug}_tau3_bench_retail_test_official_student_eval_{user_simulator_slug}.json",
             [
-                f"{student_slug}_tau3_bench_retail_test_official_student_eval_{user_simulator_slug}.json"
+                f"{student_slug}_tau3_bench_retail_test_official_student_eval_{user_simulator_slug}.json",
+                f"{student_slug}_tau3_bench_retail_test_official_hf_student_eval_{user_simulator_slug}.json",
             ],
         ),
         (
@@ -60,7 +61,8 @@ def _resolve_tau_bench_eval_result_files(
             / f"{student_slug}_tau3_retail_mlx_sft_eval_{user_simulator_slug}.json",
             [
                 f"{student_slug}_tau3_retail_sft_mlx_lm/"
-                f"{student_slug}_tau3_retail_mlx_sft_eval_{user_simulator_slug}.json"
+                f"{student_slug}_tau3_retail_mlx_sft_eval_{user_simulator_slug}.json",
+                f"{student_slug}_*_tau3_bench_retail_test_official_hf_sft_student_eval_{user_simulator_slug}.json",
             ],
         ),
     ]

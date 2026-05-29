@@ -89,6 +89,23 @@ def start_tau_bench_user_simulator_from_env(
         existing_shim.__exit__(None, None, None)
 
     model = required_env("TAU_BENCH_USER_SIMULATOR_LLM")
+    backend = os.getenv("TAU_BENCH_USER_SIMULATOR_BACKEND", "chatgpt_subscription").strip()
+    if backend == "litellm":
+        return TauBenchUserSimulatorRuntime(
+            model=model,
+            args={
+                "temperature": 0.0,
+                "num_retries": 6,
+                "timeout": 300,
+            },
+            shim=None,
+            shim_model=model,
+        )
+    if backend != "chatgpt_subscription":
+        raise RuntimeError(
+            "TAU_BENCH_USER_SIMULATOR_BACKEND must be 'chatgpt_subscription' or 'litellm'."
+        )
+
     shim_model = _chatgpt_subscription_model_from_user_simulator(model)
     shim_api_key = os.getenv("TAU_BENCH_CHATGPT_SHIM_API_KEY", "local-shim")
     shim = _start_chatgpt_subscription_shim(

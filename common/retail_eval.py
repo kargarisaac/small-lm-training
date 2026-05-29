@@ -7,7 +7,12 @@ import json
 import time
 import threading
 
-from .agents import TauBenchRetailMlxLiquidAgent, TauBenchRetailMlxStudentAgent, TauBenchRetailQwenRawCompletionAgent
+from .agents import (
+    TauBenchRetailHfStudentAgent,
+    TauBenchRetailMlxLiquidAgent,
+    TauBenchRetailMlxStudentAgent,
+    TauBenchRetailQwenRawCompletionAgent,
+)
 from .config import (
     MlflowConfig,
     TauBenchRetailEvalConfig,
@@ -140,6 +145,47 @@ class TauBenchRetailMlxStudentEvalRunner:
                 max_new_tokens=self.config.max_new_tokens,
                 sampler=self.sampler,
                 generation_lock=self.generation_lock,
+            ),
+        )
+
+
+class TauBenchRetailHfStudentEvalRunner:
+    def __init__(
+        self,
+        *,
+        runtime: TauBenchRetailRuntime,
+        model: Any,
+        tokenizer: Any,
+        qwen_tools: list[dict[str, Any]],
+        tool_schema_by_name: dict[str, dict[str, Any]],
+        config: TauBenchRetailEvalConfig,
+        trace_dir: Path,
+    ):
+        self.runtime = runtime
+        self.model = model
+        self.tokenizer = tokenizer
+        self.qwen_tools = qwen_tools
+        self.tool_schema_by_name = tool_schema_by_name
+        self.config = config
+        self.trace_dir = trace_dir
+        self.trace_dir.mkdir(parents=True, exist_ok=True)
+
+    def run_task(self, task: Any, task_index: int) -> dict[str, Any]:
+        return _run_task_with_agent(
+            runtime=self.runtime,
+            task=task,
+            task_index=task_index,
+            config=self.config,
+            trace_dir=self.trace_dir,
+            simulation_prefix="hf_student_tau3_bench_retail",
+            make_agent=lambda environment: TauBenchRetailHfStudentAgent(
+                runtime=self.runtime,
+                model=self.model,
+                tokenizer=self.tokenizer,
+                qwen_tools=self.qwen_tools,
+                tool_schema_by_name=self.tool_schema_by_name,
+                domain_policy=environment.get_policy(),
+                max_new_tokens=self.config.max_new_tokens,
             ),
         )
 

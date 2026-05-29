@@ -256,6 +256,46 @@ class TauBenchRetailMlxStudentAgent(_TauBenchRetailQwenAgentBase):
             return generate(), {}
 
 
+class TauBenchRetailHfStudentAgent(_TauBenchRetailQwenAgentBase):
+    def __init__(
+        self,
+        *,
+        runtime: TauBenchRetailRuntime,
+        model: Any,
+        tokenizer: Any,
+        qwen_tools: list[dict[str, Any]],
+        tool_schema_by_name: dict[str, dict[str, Any]],
+        domain_policy: str,
+        max_new_tokens: int = MAX_NEW_TOKENS,
+    ):
+        super().__init__(
+            runtime=runtime,
+            tokenizer=tokenizer,
+            qwen_tools=qwen_tools,
+            tool_schema_by_name=tool_schema_by_name,
+            domain_policy=domain_policy,
+        )
+        self.model = model
+        self.max_new_tokens = max_new_tokens
+
+    def _raw_completion(self, *, qwen_messages: list[dict[str, str]], prompt: str) -> tuple[str, dict[str, Any]]:
+        import torch  # noqa: PLC0415
+
+        model_device = next(self.model.parameters()).device
+        inputs = self.tokenizer(prompt, return_tensors="pt")
+        inputs = {name: value.to(model_device) for name, value in inputs.items()}
+        with torch.inference_mode():
+            output_ids = self.model.generate(
+                **inputs,
+                max_new_tokens=self.max_new_tokens,
+                do_sample=False,
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+            )
+        generated_ids = output_ids[0, inputs["input_ids"].shape[-1] :]
+        return self.tokenizer.decode(generated_ids, skip_special_tokens=False), {}
+
+
 class TauBenchRetailMlxLiquidAgent:
     def __init__(
         self,
