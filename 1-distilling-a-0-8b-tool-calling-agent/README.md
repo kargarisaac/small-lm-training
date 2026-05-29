@@ -1,20 +1,28 @@
 # Blog 1: Distilling A 0.8B Tool-Calling Agent
 
-This folder contains the teaching notebooks, assets, and runnable Python scripts for the first distillation post.
+This folder contains the teaching notebooks, assets, and runnable Python runners for the first distillation post.
 
-The notebooks are the tutorial. The scripts are the server path for running the experiment on rented NVIDIA GPUs.
+The notebooks are the tutorial. The runners are the direct command-line path for running the experiment.
 
-## Scripts
+## Runners
 
 Run these from the repo root.
 
 ```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/scripts/eval_student_hf.py
-uv run python 1-distilling-a-0-8b-tool-calling-agent/scripts/eval_teacher.py
-uv run python 1-distilling-a-0-8b-tool-calling-agent/scripts/collect_teacher_sft_rows.py
-uv run python 1-distilling-a-0-8b-tool-calling-agent/scripts/train_student_trl.py
-uv run python 1-distilling-a-0-8b-tool-calling-agent/scripts/eval_student_hf.py \
+uv run python 1-distilling-a-0-8b-tool-calling-agent/runners/eval_student_hf.py
+uv run python 1-distilling-a-0-8b-tool-calling-agent/runners/eval_student_mlx.py
+uv run python 1-distilling-a-0-8b-tool-calling-agent/runners/eval_teacher.py
+uv run python 1-distilling-a-0-8b-tool-calling-agent/runners/collect_teacher_sft_rows.py
+uv run python 1-distilling-a-0-8b-tool-calling-agent/runners/train_student_trl.py
+uv run python 1-distilling-a-0-8b-tool-calling-agent/runners/train_student_mlx.py
+uv run python 1-distilling-a-0-8b-tool-calling-agent/runners/eval_student_hf.py \
   --adapter outputs/qwen_qwen3_5_0_8b_tau3_retail_sft_trl_peft/qwen_qwen3_5_0_8b_tau3_retail_trl_lora_adapter
+```
+
+For the Apple/MLX training path:
+
+```bash
+uv run python 1-distilling-a-0-8b-tool-calling-agent/runners/train_student_mlx.py
 ```
 
 ## Environment
@@ -51,4 +59,17 @@ All generated artifacts still go to the repo-level `outputs/` folder:
 - TRL/PEFT adapter checkpoints
 - training metadata
 
-The blog folder should stay mostly notebooks, assets, and scripts. Data and model outputs should not be written here.
+The blog folder should stay mostly notebooks, assets, and runners. Data and model outputs should not be written here.
+
+## Moving Training Data To A GPU Server
+
+`outputs/` is ignored so eval logs, checkpoints, traces, and local artifacts do not leak into GitHub.
+
+If you want to train on the server without regenerating teacher trajectories, copy the successful SFT rows file:
+
+```bash
+rsync -av outputs/*_tau3_bench_retail_train_successful_sft_chat_rows_*.jsonl \
+  user@server:/path/to/distillation-blogs/outputs/
+```
+
+That JSONL is the training dataset. The large `data/external/tau2-bench/` checkout does not need to be copied; the runners can recreate it from the pinned Git revision.

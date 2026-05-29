@@ -15,4 +15,7 @@ data/external/
 # Virtual environments
 .venv
 .env
+.env.*
+!.env.example
+!.env.template
 outputs/
