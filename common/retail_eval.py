@@ -7,7 +7,7 @@ import json
 import time
 import threading
 
-from .agents import TauBenchRetailMlxStudentAgent, TauBenchRetailQwenRawCompletionAgent
+from .agents import TauBenchRetailMlxLiquidAgent, TauBenchRetailMlxStudentAgent, TauBenchRetailQwenRawCompletionAgent
 from .config import (
     MlflowConfig,
     TauBenchRetailEvalConfig,
@@ -135,6 +135,53 @@ class TauBenchRetailMlxStudentEvalRunner:
                 model=self.model,
                 tokenizer=self.tokenizer,
                 qwen_tools=self.qwen_tools,
+                tool_schema_by_name=self.tool_schema_by_name,
+                domain_policy=environment.get_policy(),
+                max_new_tokens=self.config.max_new_tokens,
+                sampler=self.sampler,
+                generation_lock=self.generation_lock,
+            ),
+        )
+
+
+class TauBenchRetailMlxLiquidEvalRunner:
+    def __init__(
+        self,
+        *,
+        runtime: TauBenchRetailRuntime,
+        model: Any,
+        tokenizer: Any,
+        tools: list[dict[str, Any]],
+        tool_schema_by_name: dict[str, dict[str, Any]],
+        sampler: Any,
+        config: TauBenchRetailEvalConfig,
+        trace_dir: Path,
+        generation_lock: threading.Lock | None = None,
+    ):
+        self.runtime = runtime
+        self.model = model
+        self.tokenizer = tokenizer
+        self.tools = tools
+        self.tool_schema_by_name = tool_schema_by_name
+        self.sampler = sampler
+        self.config = config
+        self.trace_dir = trace_dir
+        self.trace_dir.mkdir(parents=True, exist_ok=True)
+        self.generation_lock = generation_lock
+
+    def run_task(self, task: Any, task_index: int) -> dict[str, Any]:
+        return _run_task_with_agent(
+            runtime=self.runtime,
+            task=task,
+            task_index=task_index,
+            config=self.config,
+            trace_dir=self.trace_dir,
+            simulation_prefix="mlx_lfm_tau3_bench_retail",
+            make_agent=lambda environment: TauBenchRetailMlxLiquidAgent(
+                runtime=self.runtime,
+                model=self.model,
+                tokenizer=self.tokenizer,
+                tools=self.tools,
                 tool_schema_by_name=self.tool_schema_by_name,
                 domain_policy=environment.get_policy(),
                 max_new_tokens=self.config.max_new_tokens,
