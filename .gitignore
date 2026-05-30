@@ -11,6 +11,9 @@ wheels/
 outputs/local_traces/
 outputs/local_traces_smoke/
 data/external/
+data/mobile-actions/
+data/nestful/
+data/nestful_calls_le_*/
 
 # Virtual environments
 .venv

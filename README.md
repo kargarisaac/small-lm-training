@@ -1,162 +1,37 @@
 # Distillation Blogs
 
-Notebook-first tutorials plus simple runnable experiment runners for distilling a small retail tool-calling agent.
+This repo is a blog-series workspace for practical model distillation experiments.
 
-The notebooks stay in `1-distilling-a-0-8b-tool-calling-agent/` for teaching. The runners in `1-distilling-a-0-8b-tool-calling-agent/runners/` are the clean server workflow for blog one: run baseline evals, collect teacher trajectories, train with TRL/PEFT or MLX, then evaluate the trained adapter.
+The series goal is to make the tradeoffs visible: start with a small model, measure it in a real harness, generate teacher demonstrations, fine-tune the small model, then compare before and after. Later posts can reuse the same task family for softer distillation targets, on-policy correction, and reward-based training.
 
-Generated data lives in root `outputs/`. Benchmark source/cache data lives in root `data/`.
+## Blogs
 
-## Server Setup
+| Blog | Status | Focus |
+| --- | --- | --- |
+| [1. Distilling A Focused Function-Calling Model](1-distilling-a-0-8b-tool-calling-agent/) | active | Offline hard-token SFT from a stronger teacher into Qwen3.5 0.8B on a short-call NESTFUL slice. |
 
-On a rented NVIDIA box:
+## Repo Layout
 
-```bash
-git clone <your-repo-url>
-cd distillation-blogs
-uv sync
-uv pip install vllm
-```
+- `common/`: shared code used across blog posts.
+- `data/`: prepared datasets and local dataset archives.
+- `outputs/`: generated evals, teacher rows, adapters, and result summaries.
+- `docs/plan.md`: current series plan and upcoming posts.
+- `1-distilling-a-0-8b-tool-calling-agent/`: Blog 1 post, notebook, assets, scripts, and runbook.
 
-Create `.env`:
+## Project Conventions
 
-```bash
-TAU_BENCH_USER_SIMULATOR_LLM=openai/gpt-5.4-mini
-TAU_BENCH_USER_SIMULATOR_BACKEND=litellm
-OPENAI_API_KEY=...
-```
+Each blog folder owns its own runnable instructions. The root README stays as the high-level series map as more posts are added.
 
-`TAU_BENCH_USER_SIMULATOR_BACKEND=litellm` is the remote-server path. The old local ChatGPT subscription shim remains the default if this env var is not set, so the notebooks still work locally as before.
+Generated files stay out of the blog folders unless they are assets used by the post. Large or repeated run artifacts belong in root `outputs/`; prepared datasets belong in root `data/`.
 
-## Teacher Server
+Secrets belong only in `.env`, which is ignored.
 
-Start a vLLM teacher in another terminal. For NVIDIA, use the official HF model, not the MLX conversion:
+## Current Blog 1 Snapshot
 
-```bash
-uv run vllm serve Qwen/Qwen3.5-35B-A3B \
-  --host 127.0.0.1 \
-  --port 8092 \
-  --served-model-name Qwen/Qwen3.5-35B-A3B \
-  --max-model-len 81920 \
-  --dtype bfloat16 \
-  --trust-remote-code \
-  --generation-config vllm
-```
+Blog 1 uses `ibm-research/nestful`, filtered to examples with at most two expected function calls. The verified local path uses:
 
-If memory is tight, switch to an HF quantized teacher and pass that same name to the runners with `--model`.
+- student: `mlx-community/Qwen3.5-0.8B-MLX-bf16`
+- main teacher for training data: `mlx-community/Qwen3.5-35B-A3B-8bit`
+- training method: offline hard-token SFT with MLX-LM LoRA
 
-## Run Order
-
-Baseline student on held-out test tasks with HF/PyTorch:
-
-```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/runners/eval_student_hf.py
-```
-
-Baseline student on held-out test tasks with MLX-LM:
-
-```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/runners/eval_student_mlx.py
-```
-
-Teacher on held-out test tasks:
-
-```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/runners/eval_teacher.py
-```
-
-Teacher on train tasks, then extract successful SFT rows:
-
-```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/runners/collect_teacher_sft_rows.py
-```
-
-Train the small student with TRL/PEFT:
-
-```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/runners/train_student_trl.py
-```
-
-Train the small student with MLX-LM:
-
-```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/runners/train_student_mlx.py
-```
-
-Evaluate the trained adapter:
-
-```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/runners/eval_student_hf.py \
-  --adapter outputs/qwen_qwen3_5_0_8b_tau3_retail_sft_trl_peft/qwen_qwen3_5_0_8b_tau3_retail_trl_lora_adapter
-```
-
-Evaluate an MLX adapter:
-
-```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/runners/eval_student_mlx.py \
-  --adapter outputs/mlx_community_qwen3_5_0_8b_mlx_bf16_tau3_retail_sft_mlx_lm/mlx_community_qwen3_5_0_8b_mlx_bf16_tau3_retail_mlx_lora_adapter
-```
-
-Summarize trace stats:
-
-```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/runners/trace_stats.py
-```
-
-## Useful Options
-
-Run a small smoke slice:
-
-```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/runners/eval_teacher.py --limit 5
-uv run python 1-distilling-a-0-8b-tool-calling-agent/runners/collect_teacher_sft_rows.py --limit 5
-```
-
-Resume TRL training from the latest saved checkpoint:
-
-```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/runners/train_student_trl.py --resume latest
-```
-
-Change batch size without editing code:
-
-```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/runners/train_student_trl.py --batch-size 8
-```
-
-Enable MLflow logging during eval:
-
-```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/runners/eval_student_hf.py --mlflow
-uv run python 1-distilling-a-0-8b-tool-calling-agent/runners/eval_teacher.py --mlflow
-```
-
-## Script Defaults
-
-The server runners are intentionally plain:
-
-- student: `Qwen/Qwen3.5-0.8B`
-- teacher: `Qwen/Qwen3.5-35B-A3B`
-- prompt tokenizer: `Qwen/Qwen3.5-0.8B`
-- benchmark: tau3-bench retail via the pinned `tau2-bench` revision in `common/config.py`
-- eval split: all `test` tasks
-- teacher data split: all `train` tasks
-- max steps per task: `100`
-- max new tokens per model action: `2048`
-- TRL max sequence length: `16500`
-- TRL batch size: `4`
-- LoRA: final transformer layer only, rank `8`, alpha `20`, target attention and MLP projection modules
-
-The notebooks still contain the teaching walkthroughs, diagrams, and local MLX experiments. The runners are the production-ish path for running the experiment on a GPU server.
-
-## Data Transfer
-
-`outputs/` and `.env*` files are ignored. Do not push secrets or local traces to GitHub.
-
-For server training without rerunning teacher trajectory collection, copy only the SFT rows JSONL:
-
-```bash
-rsync -av outputs/*_tau3_bench_retail_train_successful_sft_chat_rows_*.jsonl \
-  user@server:/path/to/distillation-blogs/outputs/
-```
-
-The pinned tau2-bench checkout under `data/external/` is also ignored and can be recreated by the runners.
+Latest verified Blog 1 result: the student moved from `2/103` exact before SFT to `43/103` exact after SFT on the held-out eval split.
