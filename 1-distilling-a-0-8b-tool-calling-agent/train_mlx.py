@@ -86,7 +86,7 @@ def main() -> None:
     print("MLX-LM LoRA args:", {key: lora_args[key] for key in ("model", "data", "adapter_path", "iters", "batch_size", "grad_accumulation_steps", "learning_rate", "num_layers", "max_seq_length", "lora_parameters", "mask_prompt", "resume_adapter_file", "seed", "save_every")})
     if "qwen" in args.model.lower() and not cfg.QWEN_ENABLE_THINKING:
         print("Note: direct Qwen inference and SFT token-length checks use enable_thinking=False.")
-        print("Note: mlx_lm.lora does not expose chat-template kwargs, so prefer train_unsloth.py or train_trl.py for exact no-thinking SFT.")
+        print("Note: mlx_lm.lora does not expose chat-template kwargs, so prefer train_unsloth.py for exact no-thinking SFT.")
     if args.dry_run:
         return
     sql_agent.write_mlx_lm_data(mlx_data_dir, train_rows, valid_rows)

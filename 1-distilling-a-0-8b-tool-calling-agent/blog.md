@@ -99,6 +99,15 @@ books
 chinook
 ```
 
+With the current notebook settings, that gives:
+
+```text
+candidate rows: 1099
+train rows: 879
+eval rows: 220
+eval fraction: 0.2 per selected database
+```
+
 ## The Harness
 
 The model has one action interface:
@@ -271,7 +280,7 @@ uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
   --data-dir data/sql_agent_bird_critic \
   --max-turns 8 \
   --max-new-tokens 1024 \
-  --output outputs/qwen3_5_0_8b_mlx_sql_agent_eval_100.json
+  --output outputs/qwen3_5_0_8b_mlx_sql_agent_eval.json
 ```
 
 GPT teacher:
@@ -284,7 +293,7 @@ uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
   --data-dir data/sql_agent_bird_critic \
   --max-turns 8 \
   --max-new-tokens 2048 \
-  --output outputs/gpt_5_5_medium_sql_agent_eval_100.json
+  --output outputs/gpt_5_5_medium_sql_agent_eval.json
 ```
 
 Qwen teacher:
@@ -304,7 +313,7 @@ uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
   --data-dir data/sql_agent_bird_critic \
   --max-turns 8 \
   --max-new-tokens 2048 \
-  --output outputs/qwen3_5_35b_a3b_8bit_mlx_server_sql_agent_eval_100.json
+  --output outputs/qwen3_5_35b_a3b_8bit_mlx_server_sql_agent_eval.json
 ```
 
 Current BAML-harness held-out results:
@@ -344,15 +353,7 @@ uv run python 1-distilling-a-0-8b-tool-calling-agent/generate_sql_teacher_sft_ro
   --output outputs/gpt_5_5_medium_sql_agent_train_baml_sft_trace_rows.jsonl
 ```
 
-Previous completed GPT teacher generation, before the percentage-based domain split:
-
-```text
-completed train tasks: 500/500
-successful trajectories: 242/500
-BAML-canonical SFT trace rows: 767
-canonical rows <= 3072 tokens: 737
-canonical rows <= 4096 tokens: 754
-```
+Teacher generation must use the current percentage split. A full train run should report `879` attempted train tasks. If it reports `500`, the prepared data is stale.
 
 The teacher script writes BAML-canonical SFT trace rows from successful trajectories. The second notebook then turns those BAML-canonical SFT trace rows into the final SFT file:
 
@@ -371,7 +372,7 @@ The important detail is that we only keep rows from trajectories that fully pass
 
 ## Training
 
-The recommended NVIDIA training path uses Unsloth bf16 LoRA. The same defaults are used by MLX and TRL where the backend supports them:
+The recommended NVIDIA training path uses Unsloth bf16 LoRA. MLX is kept as an Apple-side experiment path:
 
 ```text
 max_seq_length: 3072
@@ -395,7 +396,7 @@ uv run python 1-distilling-a-0-8b-tool-calling-agent/train_unsloth.py \
 
 For Apple/MLX:
 
-Direct MLX inference uses the no-thinking Qwen chat template. MLX-LM LoRA does not expose that same chat-template flag in its trainer, so I treat MLX training as an Apple experiment path and use Unsloth/TRL when I need exact no-thinking SFT parity.
+Direct MLX inference uses the no-thinking Qwen chat template. MLX-LM LoRA does not expose that same chat-template flag in its trainer, so I treat MLX training as an Apple experiment path and use Unsloth when I need exact no-thinking SFT parity.
 
 ```bash
 uv run python 1-distilling-a-0-8b-tool-calling-agent/train_mlx.py \
@@ -454,7 +455,7 @@ uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
   --data-dir data/sql_agent_bird_critic \
   --max-turns 8 \
   --max-new-tokens 1024 \
-  --output outputs/qwen3_5_0_8b_unsloth_sql_agent_gpt_teacher_sft_3072_eval_100.json
+  --output outputs/qwen3_5_0_8b_unsloth_sql_agent_gpt_teacher_sft_3072_eval.json
 ```
 
 Result:
@@ -484,10 +485,9 @@ The result should be interpreted only after rerunning every model through the sa
 
 For the next iteration of Blog 1, the highest-leverage fixes are:
 
-1. Run the `737`-row canonical 3072-token SFT file through the recommended Unsloth recipe.
+1. Run the current canonical 3072-token SFT file through the recommended Unsloth recipe.
 2. Add a small format-only warmup set so the student learns to emit one JSON action per turn.
-3. Compare Unsloth and TRL on the same config.
-4. Try a stronger or slightly larger student if the 0.8B model keeps failing the action protocol.
+3. Try a stronger or slightly larger student if the 0.8B model keeps failing the action protocol.
 
 ## Where The Series Goes Next
 

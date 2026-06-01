@@ -60,7 +60,7 @@ The default BAML client for `SqlAgentNextAction` is:
 MlxCommunityQwen35_08bMlxBf16
 ```
 
-On Apple Silicon, start the MLX server before using the BAML VSCode playground or `baml-cli test`:
+Start it before using the BAML VSCode playground or `baml-cli test`:
 
 ```bash
 uv run mlx_lm.server \
@@ -69,24 +69,6 @@ uv run mlx_lm.server \
   --port 8091 \
   --chat-template-args '{"enable_thinking": false}'
 ```
-
-On NVIDIA/CUDA, serve the Hugging Face model through vLLM instead. Install vLLM once as a user-level `uv` tool so all projects can reuse the same isolated vLLM command without sharing vLLM's stricter CUDA dependency set with each notebook or training environment:
-
-```bash
-uv tool install --python 3.12 "vllm>=0.22.0"
-
-VLLM_USE_FLASHINFER_SAMPLER=0 vllm serve Qwen/Qwen3.5-0.8B \
-  --host 127.0.0.1 \
-  --port 8091 \
-  --served-model-name Qwen/Qwen3.5-0.8B \
-  --max-model-len 32768 \
-  --gpu-memory-utilization 0.85 \
-  --default-chat-template-kwargs '{"enable_thinking": false}'
-```
-
-`VLLM_USE_FLASHINFER_SAMPLER=0` avoids requiring a system `nvcc` install on machines where the vLLM wheel and NVIDIA driver are present but `/usr/local/cuda` is not.
-
-`Qwen/Qwen3.5-0.8B` uses Qwen3.5's GDN/linear-attention path. If vLLM reports a GDN or Triton CUDA launch failure on an Ada GPU such as an RTX 4080, stop retrying that same process; reset or reboot the GPU before starting another CUDA server, then use a newer vLLM build or a non-vLLM Transformers server for this architecture.
 
 Then run:
 
@@ -99,14 +81,13 @@ Configured BAML clients:
 | BAML client | Model | Server to start |
 | --- | --- | --- |
 | `MlxCommunityQwen35_08bMlxBf16` | `mlx-community/Qwen3.5-0.8B-MLX-bf16` | `mlx_lm.server` on `8091` |
-| dynamic notebook/eval client | `Qwen/Qwen3.5-0.8B` | vLLM OpenAI server on `8091` |
 | `MlxCommunityQwen35_35bA3b8bit` | `mlx-community/Qwen3.5-35B-A3B-8bit` | `mlx_lm.server` on `8092` |
 | `LiquidAiLfm25_8bA1bMlx8bit` | `LiquidAI/LFM2.5-8B-A1B-MLX-8bit` | `mlx_lm.server` on `8093` |
 | `Gpt55Medium` | `gpt-5.5` | local ChatGPT shim on `8080` |
 | `Qwen35_08bSqlAgentVllm` | `qwen3_5_0_8b_sql_agent` | vLLM OpenAI server on `8094` |
 | `MlxCommunityQwen35_08bMlxBf16Lora` | `mlx-community/Qwen3.5-0.8B-MLX-bf16` with adapter | `mlx_lm.server --adapter-path ...` on `8095` |
 
-The Python eval scripts and Notebook 01 choose a model dynamically with `--model`/`model_name` and `--base-url`/`base_url`, so they can use either MLX or vLLM. The BAML VSCode extension uses the static client selected in `baml_src/sql_agent.baml`, so that server must be running first.
+The Python eval scripts can still choose a model dynamically with `--model` and `--base-url`. The BAML VSCode extension uses the static client selected in `baml_src/sql_agent.baml`, so that server must be running first.
 
 ## Serving Versus Training
 
@@ -136,7 +117,7 @@ Training options:
 | Machine | Typical trainer | Used for |
 | --- | --- | --- |
 | Mac | `mlx-lm` or `mlx-tune` | local LoRA experiments |
-| NVIDIA | Unsloth or TRL/PEFT | main training runs |
+| NVIDIA | Unsloth bf16 LoRA | main training runs |
 
 For Blog 1 hard-token SFT, we train on canonical BAML decisions:
 
@@ -147,6 +128,68 @@ For Blog 1 hard-token SFT, we train on canonical BAML decisions:
 For a later soft-label/logit post, BAML is still useful for deciding the canonical target string, but BAML itself does not give token probabilities. We would score the canonical BAML target under the teacher model in teacher-forcing/scoring mode.
 
 Teacher forcing here means: instead of asking the teacher to generate the answer freely, we feed the prompt plus the known target tokens to the model and ask, token by token, what probability it assigned to each target token. That needs a serving/scoring path that exposes logprobs, such as vLLM or a direct HF forward pass.
+
+## NVIDIA GPU Server Safety Setup
+
+On the RTX 4080 16GB machine we saw the system become unreachable when heavy model serving/training pushed the box too hard. The stable workaround for Blog 1 student training was:
+
+- cap GPU power at `150W`
+- keep persistence mode on
+- add extra swap so host-RAM spikes do not freeze SSH immediately
+- avoid local Qwen 35B teacher serving on this 16GB GPU/14GB RAM box
+
+Run this once on a fresh Linux GPU machine:
+
+```bash
+sudo nvidia-smi -pm 1
+sudo nvidia-smi -pl 150
+
+cat <<'SERVICE' | sudo tee /etc/systemd/system/nvidia-power-limit.service
+[Unit]
+Description=Set NVIDIA GPU power limit for safe local LLM workloads
+After=multi-user.target nvidia-persistenced.service
+Wants=nvidia-persistenced.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/nvidia-smi -pm 1
+ExecStart=/usr/bin/nvidia-smi -pl 150
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now nvidia-power-limit.service
+```
+
+Add a 32GB swap buffer if the machine has low system RAM:
+
+```bash
+sudo fallocate -l 32G /swap-llm.img
+sudo chmod 600 /swap-llm.img
+sudo mkswap /swap-llm.img
+sudo swapon /swap-llm.img
+echo "/swap-llm.img none swap sw 0 0" | sudo tee -a /etc/fstab
+```
+
+Verify before long runs:
+
+```bash
+nvidia-smi --query-gpu=name,power.limit,power.draw,temperature.gpu,memory.used,memory.total --format=csv
+free -h
+swapon --show
+systemctl is-active nvidia-power-limit.service
+```
+
+You do **not** need to run `nvidia-smi -pl 150` before every training run if the systemd service is active. Do verify after a reboot, driver reinstall, rented-server rebuild, or image reset. If `power.limit` is not `150.00 W`, run:
+
+```bash
+sudo systemctl restart nvidia-power-limit.service
+```
+
+The 150W cap is a stability guard, not a VRAM limiter. It reduces maximum electrical/thermal load; it does not reduce the model's GPU memory allocation. For memory pressure, use smaller models, lower context length, lower batch/concurrency, quantization, or more VRAM/system RAM.
 
 ## 1. Explore And Prepare Data
 
@@ -167,56 +210,26 @@ DB_FILTER = ["netflix", "movie_3", "books", "chinook"]
 
 It filters to the selected task category and databases, splits each database by percentage, then writes `data/sql_agent_bird_critic/train.jsonl`, `eval.jsonl`, `stats.json`, and the SQLite templates under `data/sql_agent_bird_critic/dbs/`.
 
-## 2. Evaluate The Base Student
-
-### NVIDIA Path: vLLM
-
-Serve the Hugging Face model with the OpenAI-compatible vLLM server:
-
-```bash
-VLLM_USE_FLASHINFER_SAMPLER=0 vllm serve Qwen/Qwen3.5-0.8B \
-  --host 127.0.0.1 \
-  --port 8091 \
-  --served-model-name Qwen/Qwen3.5-0.8B \
-  --max-model-len 32768 \
-  --gpu-memory-utilization 0.85 \
-  --default-chat-template-kwargs '{"enable_thinking": false}'
-```
-
-The important serving/eval numbers are different budgets:
+Current split written by Notebook 01:
 
 ```text
---max-model-len 32768
-  vLLM's total context window per request: prompt tokens plus generated tokens.
-  SQL-agent prompts can become large after schema observations, so use a larger
-  server window when allowing 4096 generated tokens.
-
---max-new-tokens 4096
-  Maximum generated tokens for one assistant action. The model usually emits
-  far less because each turn should be one JSON decision, but this leaves enough
-  room for long final SQL submissions.
-
---max-turns 8
-  Maximum SQL-agent loop steps for one benchmark row. It is not a token setting.
+candidate rows: 1099
+train rows: 879
+eval rows: 220
+eval fraction: 0.2 per selected database
 ```
 
-For every model call, `prompt_tokens + max_new_tokens` must fit inside `max_model_len`. Do not pair `--max-model-len 4096` with `--max-new-tokens 4096`; that leaves no space for the prompt and will fail even if the server is reachable.
+## 2. Evaluate The Base Student
 
-Run the BAML harness eval:
+Model:
 
-```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
-  --model Qwen/Qwen3.5-0.8B \
-  --base-url http://127.0.0.1:8091/v1 \
-  --data-dir data/sql_agent_bird_critic \
-  --max-turns 8 \
-  --max-new-tokens 4096 \
-  --output outputs/qwen3_5_0_8b_vllm_sql_agent_eval.json
+```text
+mlx-community/Qwen3.5-0.8B-MLX-bf16
 ```
 
-Notebook 01 uses the same local server in its optional live one-task run. The notebook writes `train.jsonl`, `eval.jsonl`, `stats.json`, and downloads the SQLite templates before the live harness call needs them.
+Command:
 
-### Apple Path: MLX
+Start the student server:
 
 ```bash
 uv run mlx_lm.server \
@@ -225,6 +238,8 @@ uv run mlx_lm.server \
   --port 8091 \
   --chat-template-args '{"enable_thinking": false}'
 ```
+
+Run the BAML harness eval:
 
 ```bash
 uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
@@ -364,15 +379,7 @@ uv run python 1-distilling-a-0-8b-tool-calling-agent/generate_sql_teacher_sft_ro
 
 Teacher row generation also uses the BAML structured output contract.
 
-Previous completed GPT teacher generation, before the percentage-based domain split:
-
-```text
-completed train tasks: 500/500
-successful trajectories: 242/500
-BAML-canonical SFT trace rows: 767
-canonical rows <= 3072 tokens: 737
-canonical rows <= 4096 tokens: 754
-```
+Teacher generation must use the current percentage split. A run over the full current train partition should report `879` attempted train tasks. If it reports `500`, it is using stale prepared data.
 
 The script is resumable and caches after every task. For OpenAI-compatible teachers it isolates each task in a worker process by default, so a stuck subscription call becomes `teacher_runtime_error` and the run continues. The rows are BAML-canonical trace rows at this stage; Notebook 02 decides how to filter them by token length and write the final train/validation file.
 
@@ -406,7 +413,7 @@ validation_fraction: 0.05
 seed: 42
 ```
 
-At `3072`, the canonical GPT-teacher SFT file keeps `737/767` rows. If a 16GB GPU still OOMs, drop to `2560`, which keeps `679/767` rows.
+After teacher generation finishes on the current split, Notebook 02 prints how many canonical rows fit each sequence length. Use those current numbers when choosing `--max-seq-length`.
 
 ## 6. Train The Student
 
@@ -427,7 +434,7 @@ This is the recommended path for a rented RTX 4080 16GB. It uses bf16 LoRA by de
 
 ### Apple Path: MLX-LM
 
-Direct MLX inference uses `enable_thinking=false`. MLX-LM LoRA does not currently expose the same chat-template option in its trainer, so use this path for Apple-side experiments and prefer Unsloth/TRL when you need exact no-thinking SFT parity.
+Direct MLX inference uses `enable_thinking=false`. MLX-LM LoRA does not currently expose the same chat-template option in its trainer, so use this path for Apple-side experiments and prefer Unsloth when you need exact no-thinking SFT parity.
 
 ```bash
 uv run python 1-distilling-a-0-8b-tool-calling-agent/train_mlx.py \
@@ -436,22 +443,11 @@ uv run python 1-distilling-a-0-8b-tool-calling-agent/train_mlx.py \
   --output-dir outputs/qwen3_5_0_8b_mlx_sql_agent_gpt_teacher_sft_3072
 ```
 
-### Reference NVIDIA Path: TRL/PEFT
-
-```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/train_trl.py \
-  --model Qwen/Qwen3.5-0.8B \
-  --train-path outputs/gpt_5_5_medium_sql_agent_train_sft_canonical_3072.jsonl \
-  --output-dir outputs/qwen3_5_0_8b_trl_sql_agent_gpt_teacher_sft_3072
-```
-
-TRL is kept because later soft-label/logit distillation will likely need a more standard PyTorch training loop. For Blog 1 hard-token SFT on a 16GB NVIDIA GPU, Unsloth is the preferred path.
-
 ## 7. Evaluate The Tuned Student
 
 The evaluation harness should still go through BAML. Serve the tuned model through an OpenAI-compatible endpoint, then run the same eval script with `--model` and `--base-url`.
 
-For an Unsloth/TRL adapter on the GPU server, one option is vLLM with LoRA enabled:
+For an Unsloth adapter on the GPU server, one option is vLLM with LoRA enabled:
 
 ```bash
 python -m vllm.entrypoints.openai.api_server \
@@ -513,7 +509,6 @@ Fill this in only after rerunning the tuned model through the same BAML structur
 
 ## Next Fixes
 
-- Run the 737-row canonical 3072-token SFT file through the recommended Unsloth recipe.
+- Run the current canonical 3072-token SFT file through the recommended Unsloth recipe.
 - Add a format-only warmup dataset so the student reliably emits JSON actions before learning SQL.
-- Compare Unsloth against the TRL reference path on the same config.
 - Consider training more LoRA layers or a stronger small student.

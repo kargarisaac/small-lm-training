@@ -30,6 +30,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=cfg.SFT_SEED)
     parser.add_argument("--max-steps", type=int, default=-1)
     parser.add_argument("--load-in-4bit", action="store_true")
+    parser.add_argument("--no-grad-checkpoint", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -70,6 +71,7 @@ def main() -> None:
     print("Max steps:", max_steps)
     print("Adapter dir:", adapter_dir)
     print("Load in 4bit:", args.load_in_4bit)
+    print("Gradient checkpointing:", not args.no_grad_checkpoint)
     if args.dry_run:
         return
 
@@ -90,7 +92,7 @@ def main() -> None:
         lora_dropout=0,
         target_modules=cfg.SFT_TARGET_MODULES,
         bias="none",
-        use_gradient_checkpointing="unsloth",
+        use_gradient_checkpointing=False if args.no_grad_checkpoint else "unsloth",
         random_state=args.seed,
     )
     trainer = SFTTrainer(
@@ -111,7 +113,7 @@ def main() -> None:
             save_total_limit=2,
             bf16=is_bfloat16_supported(),
             fp16=not is_bfloat16_supported(),
-            gradient_checkpointing=True,
+            gradient_checkpointing=not args.no_grad_checkpoint,
             report_to=[],
             remove_unused_columns=False,
             packing=False,
