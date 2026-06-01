@@ -520,7 +520,31 @@ def canonical_decision_text(draft: str | None, action: dict[str, Any]) -> str:
     )
 
 
+def render_baml_sql_agent_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    from baml_py import ClientRegistry
+    from baml_client import b
+    from baml_client.types import SqlAgentMessage
+
+    client_registry = ClientRegistry()
+    client_registry.add_llm_client(
+        "SqlAgentRuntimeClient",
+        "openai-generic",
+        {"base_url": "http://127.0.0.1:1/v1", "model": "sql-agent-sft-render", "api_key": "dummy"},
+    )
+    client_registry.set_primary("SqlAgentRuntimeClient")
+    request = b.with_options(client_registry=client_registry).request.SqlAgentNextAction(
+        [SqlAgentMessage(role=message["role"], content=message["content"]) for message in messages],
+    )
+    body = request.body.json()
+    rendered = body.get("messages")
+    if not isinstance(rendered, list) or not all(isinstance(message, dict) for message in rendered):
+        raise RuntimeError(f"BAML rendered an unexpected SQL-agent request body: {body!r}")
+    return [{"role": str(message["role"]), "content": str(message["content"])} for message in rendered]
+
+
 def canonical_sft_row(row: dict[str, Any]) -> dict[str, Any]:
+    if row.get("sft_prompt_format") == "baml_sql_agent":
+        return row
     if "teacher_action" not in row:
         raise ValueError(f"SFT row {row.get('id', '<unknown>')} is missing teacher_action.")
     messages = list(row["messages"])
@@ -536,7 +560,11 @@ def canonical_sft_row(row: dict[str, Any]) -> dict[str, Any]:
         if action is None:
             raise ValueError(f"SFT row {row.get('id', '<unknown>')} contains an unparseable previous assistant action.")
         canonical_messages.append({"role": "assistant", "content": canonical_decision_text(draft, action)})
-    return row | {"messages": canonical_messages + [{"role": "assistant", "content": target}]}
+    return row | {
+        "messages": render_baml_sql_agent_messages(canonical_messages) + [{"role": "assistant", "content": target}],
+        "sft_prompt_format": "baml_sql_agent",
+        "sft_target_format": "baml_decision_json",
+    }
 
 
 def prepare_sft_rows(
