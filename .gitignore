@@ -14,6 +14,7 @@ data/external/
 data/mobile-actions/
 data/nestful/
 data/nestful_calls_le_*/
+data/sql_agent_bird_critic/dbs/
 
 # Virtual environments
 .venv

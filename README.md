@@ -1,37 +1,44 @@
 # Distillation Blogs
 
-This repo is a blog-series workspace for practical model distillation experiments.
+This repo is a hands-on series about specializing small models for tool-use harnesses.
 
-The series goal is to make the tradeoffs visible: start with a small model, measure it in a real harness, generate teacher demonstrations, fine-tune the small model, then compare before and after. Later posts can reuse the same task family for softer distillation targets, on-policy correction, and reward-based training.
+The point is not only "small model imitates big model." For agentic systems, the model lives behind an interface: prompt builder, parser, tools, environment observations, and deterministic scoring or reward. The series studies how to distill behavior inside that harness.
 
-## Blogs
+## Posts
 
-| Blog | Status | Focus |
+| Post | Status | Topic |
 | --- | --- | --- |
-| [1. Distilling A Focused Function-Calling Model](1-distilling-a-0-8b-tool-calling-agent/) | active | Offline hard-token SFT from a stronger teacher into Qwen3.5 0.8B on a short-call NESTFUL slice. |
+| [1. Distilling A 0.8B SQL Tool-Use Agent](1-distilling-a-0-8b-tool-calling-agent/) | active | Offline hard-token distillation for a multi-turn SQLite agent harness. |
 
-## Repo Layout
+## Current Blog 1 Setup
 
-- `common/`: shared code used across blog posts.
-- `data/`: prepared datasets and local dataset archives.
-- `outputs/`: generated evals, teacher rows, adapters, and result summaries.
-- `docs/plan.md`: current series plan and upcoming posts.
-- `1-distilling-a-0-8b-tool-calling-agent/`: Blog 1 post, notebook, assets, scripts, and runbook.
+Blog 1 now uses `birdsql/six-gym-sqlite`, a BIRD-Critic/SIX-GYM SQLite dataset with real databases, SQL test cases, and deterministic scoring.
 
-## Project Conventions
+The prepared SQLite templates are about `554 MB`; two files exceed GitHub's normal file-size limit, so the repo keeps the small split JSONL files and regenerates/downloads database templates from Blog 1 Notebook 01.
 
-Each blog folder owns its own runnable instructions. The root README stays as the high-level series map as more posts are added.
+The harness loop is:
 
-Generated files stay out of the blog folders unless they are assets used by the post. Large or repeated run artifacts belong in root `outputs/`; prepared datasets belong in root `data/`.
+```text
+question -> model JSON action -> SQLite tool result -> next model action -> submit SQL -> tests
+```
 
-Secrets belong only in `.env`, which is ignored.
+Current full eval results on the 100-row held-out split:
 
-## Current Blog 1 Snapshot
+| Run | Success |
+| --- | ---: |
+| Qwen3.5-0.8B MLX base student | 4/100 |
+| LFM2.5-8B-A1B MLX 8-bit baseline | 0/100 |
+| Qwen3.5-35B-A3B 8-bit MLX-server teacher | 33/100 |
+| GPT 5.5 medium teacher | 51/100 |
+| Qwen3.5-0.8B after first partial GPT-SFT run | 1/100 |
 
-Blog 1 uses `ibm-research/nestful`, filtered to examples with at most two expected function calls. The verified local path uses:
+The first partial SFT attempt did **not** improve the student. The next training recipe uses the completed GPT teacher set: 242 successful trajectories, 767 SFT rows, canonical one-action labels, and a 3072-token default that keeps 737 rows. Blog 1 now treats Unsloth bf16 LoRA as the recommended NVIDIA path for a 16GB GPU, with MLX and TRL kept as Apple/reference paths.
 
-- student: `mlx-community/Qwen3.5-0.8B-MLX-bf16`
-- main teacher for training data: `mlx-community/Qwen3.5-35B-A3B-8bit`
-- training method: offline hard-token SFT with MLX-LM LoRA
+## Folders
 
-Latest verified Blog 1 result: the student moved from `2/103` exact before SFT to `43/103` exact after SFT on the held-out eval split.
+- `common/`: shared code for model generation, config, ChatGPT shim, and the SQL-agent harness.
+- `1-distilling-a-0-8b-tool-calling-agent/`: Blog 1 scripts, notebooks, blog draft, and runbook.
+- `data/`: prepared benchmark splits and SQLite templates.
+- `outputs/`: eval reports, teacher traces, SFT rows, adapters, and summaries.
+
+Blog-specific commands live in the blog folder README.

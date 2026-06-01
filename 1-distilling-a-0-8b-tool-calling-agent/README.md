@@ -1,111 +1,198 @@
-# Blog 1: Distilling A Focused Function-Calling Model
+# Blog 1: Distilling A 0.8B SQL Tool-Use Agent
 
-This folder contains the Blog 1 post, teaching notebook, assets, and runnable scripts.
+This post uses a deterministic multi-turn SQL harness instead of a one-turn function-plan benchmark.
 
-The experiment asks:
-
-> Can a 0.8B model learn short nested function-call sequencing from a stronger teacher?
-
-The verified local path uses:
-
-- **student:** `mlx-community/Qwen3.5-0.8B-MLX-bf16`
-- **main teacher for training data:** `mlx-community/Qwen3.5-35B-A3B-8bit`, served through `mlx_lm.server`
-- **teacher baselines only:** `gpt-5.5` medium through the local ChatGPT subscription shim, and `LiquidAI/LFM2.5-8B-A1B-MLX-8bit`
-- **training method:** offline hard-token SFT with MLX-LM LoRA
-
-## Files
-
-- Blog markdown: [blog.md](blog.md)
-- Teaching notebook: [notebooks/01_explore_nestful_short.ipynb](notebooks/01_explore_nestful_short.ipynb)
-- Dataset preparation: [prepare_nestful.py](prepare_nestful.py)
-- Evaluation: [eval_nestful.py](eval_nestful.py)
-- Teacher row generation: [generate_teacher_sft_rows.py](generate_teacher_sft_rows.py)
-- MLX training: [train_mlx.py](train_mlx.py)
-- ChatGPT subscription shim: [serve_chatgpt_shim.py](serve_chatgpt_shim.py)
-
-## Backend Meaning
-
-- `mlx`: the script loads a local MLX-LM model itself.
-- `openai`: the script calls an OpenAI-compatible HTTP server at `/v1/chat/completions`. In this runbook that means either `mlx_lm.server` for the local Qwen teacher, or the local ChatGPT subscription shim for GPT 5.5.
-- `hf`: supported by the scripts, but not part of the verified local Blog 1 run.
-
-Run all commands from the repo root.
-
-## 0. Setup
-
-```bash
-uv sync
-```
-
-## 1. Prepare The Dataset
-
-Blog 1 uses `ibm-research/nestful`, filtered to reference solutions with at most two function calls.
-
-```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/prepare_nestful.py --max-calls 2
-```
-
-Output:
+Dataset:
 
 ```text
-data/nestful_calls_le_2/train.jsonl
-data/nestful_calls_le_2/eval.jsonl
-data/nestful_calls_le_2/stats.json
+birdsql/six-gym-sqlite
 ```
 
-Expected split:
+Prepared split:
 
-- train rows: `506`
-- eval rows: `103`
-- split seed: `42`
-- eval fraction: `0.2`
-
-## 2. Run The Student Baseline
-
-```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_nestful.py \
-  --backend mlx \
-  --model mlx-community/Qwen3.5-0.8B-MLX-bf16 \
-  --data-dir data/nestful_calls_le_2 \
-  --output outputs/qwen3_5_0_8b_mlx_nestful_calls_le_2_eval_parser_v2.json
+```text
+data/sql_agent_bird_critic/train.jsonl  # written by Notebook 01
+data/sql_agent_bird_critic/eval.jsonl   # written by Notebook 01
+data/sql_agent_bird_critic/dbs/         # SQLite templates
 ```
 
-This evaluates the untuned small model on the held-out eval split.
+Current prepared data size on disk is about `554 MB`, mostly SQLite templates. The split JSONL files are small and can be committed. The SQLite templates are ignored because two files are larger than GitHub's normal file-size limit:
 
-## 3. Run Teacher Baselines
+```text
+employees_template.sqlite  # about 245 MB
+airline_template.sqlite    # about 161 MB
+```
 
-Only the Qwen teacher is used for training data in this post. GPT 5.5 and LFM are eval baselines for comparison.
+On a rented GPU server, run Notebook 01 after pulling the repo. It recreates the same split and downloads the needed SQLite templates.
 
-### 3.1 Qwen Teacher Through MLX-LM Server
+Teaching notebooks:
 
-Start the Qwen teacher server in a separate terminal:
+```text
+1-distilling-a-0-8b-tool-calling-agent/notebooks/01_explore_sql_agent_benchmark.ipynb
+1-distilling-a-0-8b-tool-calling-agent/notebooks/02_explore_teacher_sft_data.ipynb
+```
+
+Notebook 01 explores the benchmark, writes the train/eval split, and shows the harness on one task. Notebook 02 explores teacher traces and writes the final filtered SFT data. Full eval, teacher generation, and training runs use the scripts below.
+
+Harness actions:
+
+```json
+{"action": "inspect_schema"}
+{"action": "run_sql_query", "sql": "SELECT ..."}
+{"action": "submit_sql", "sql": ["SQL statement 1", "SQL statement 2"]}
+```
+
+The environment executes real SQLite, returns rows/errors, and scores submitted SQL with the dataset test cases.
+
+## BAML Clients And VSCode Extension
+
+The harness uses BAML for OpenAI-compatible model calls. BAML does not load MLX or vLLM models by itself; it calls a running HTTP server. If the BAML VSCode extension shows an error like:
+
+```text
+connect ECONNREFUSED 127.0.0.1:8091
+```
+
+it means the selected BAML client points to a local port where no model server is running yet.
+
+The default BAML client for `SqlAgentNextAction` is:
+
+```text
+MlxCommunityQwen35_08bMlxBf16
+```
+
+Start it before using the BAML VSCode playground or `baml-cli test`:
 
 ```bash
 uv run mlx_lm.server \
-  --model mlx-community/Qwen3.5-35B-A3B-8bit \
+  --model mlx-community/Qwen3.5-0.8B-MLX-bf16 \
   --host 127.0.0.1 \
-  --port 8092 \
-  --max-tokens 4096 \
-  --temp 0 \
-  --top-p 1 \
-  --top-k 0 \
+  --port 8091 \
   --chat-template-args '{"enable_thinking": false}'
 ```
 
-Then evaluate the teacher:
+Then run:
 
 ```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_nestful.py \
-  --backend openai \
-  --model mlx-community/Qwen3.5-35B-A3B-8bit \
-  --base-url http://127.0.0.1:8092/v1 \
-  --data-dir data/nestful_calls_le_2 \
-  --output outputs/qwen3_5_35b_a3b_8bit_mlx_server_nestful_calls_le_2_eval_parser_v2.json
+uv run baml-cli test -i "SqlAgentNextAction::"
 ```
 
-### 3.2 GPT 5.5 Medium Baseline
+Configured BAML clients:
 
-Start the local ChatGPT subscription shim in a separate terminal:
+| BAML client | Model | Server to start |
+| --- | --- | --- |
+| `MlxCommunityQwen35_08bMlxBf16` | `mlx-community/Qwen3.5-0.8B-MLX-bf16` | `mlx_lm.server` on `8091` |
+| `MlxCommunityQwen35_35bA3b8bit` | `mlx-community/Qwen3.5-35B-A3B-8bit` | `mlx_lm.server` on `8092` |
+| `LiquidAiLfm25_8bA1bMlx8bit` | `LiquidAI/LFM2.5-8B-A1B-MLX-8bit` | `mlx_lm.server` on `8093` |
+| `Gpt55Medium` | `gpt-5.5` | local ChatGPT shim on `8080` |
+| `Qwen35_08bSqlAgentVllm` | `qwen3_5_0_8b_sql_agent` | vLLM OpenAI server on `8094` |
+| `MlxCommunityQwen35_08bMlxBf16Lora` | `mlx-community/Qwen3.5-0.8B-MLX-bf16` with adapter | `mlx_lm.server --adapter-path ...` on `8095` |
+
+The Python eval scripts can still choose a model dynamically with `--model` and `--base-url`. The BAML VSCode extension uses the static client selected in `baml_src/sql_agent.baml`, so that server must be running first.
+
+## Serving Versus Training
+
+Keep these two concerns separate:
+
+```text
+serving/eval/data generation:
+  model server -> BAML -> SQL harness -> trace/result
+
+training:
+  canonical SFT JSONL -> trainer -> adapter/checkpoint
+```
+
+BAML lives in the serving/eval/data-generation harness. It calls a model endpoint, parses the model output into `draft` plus `output`, and the SQL environment executes the parsed action.
+
+The trainer does not call BAML. It only sees tokenized examples built from successful harness traces.
+
+Serving options:
+
+| Machine | Typical server | Used for |
+| --- | --- | --- |
+| Mac | `mlx_lm.server` | local eval, BAML playground, teacher/student trace generation |
+| NVIDIA | `vLLM` OpenAI-compatible server | GPU eval, faster batch serving, LoRA serving, future probability/logprob work |
+
+Training options:
+
+| Machine | Typical trainer | Used for |
+| --- | --- | --- |
+| Mac | `mlx-lm` or `mlx-tune` | local LoRA experiments |
+| NVIDIA | Unsloth or TRL/PEFT | main training runs |
+
+For Blog 1 hard-token SFT, we train on canonical BAML decisions:
+
+```json
+{"draft": "Need schema first.", "output": {"action": "inspect_schema"}}
+```
+
+For a later soft-label/logit post, BAML is still useful for deciding the canonical target string, but BAML itself does not give token probabilities. We would score the canonical BAML target under the teacher model in teacher-forcing/scoring mode.
+
+Teacher forcing here means: instead of asking the teacher to generate the answer freely, we feed the prompt plus the known target tokens to the model and ask, token by token, what probability it assigned to each target token. That needs a serving/scoring path that exposes logprobs, such as vLLM or a direct HF forward pass.
+
+## 1. Explore And Prepare Data
+
+Run:
+
+```text
+1-distilling-a-0-8b-tool-calling-agent/notebooks/01_explore_sql_agent_benchmark.ipynb
+```
+
+The notebook uses visible split variables:
+
+```python
+SPLIT_SEED = 42
+EVAL_FRACTION = cfg.SQL_AGENT_EVAL_FRACTION
+TASK_CATEGORY = "Query"
+DB_FILTER = ["netflix", "movie_3", "books", "chinook"]
+```
+
+It filters to the selected task category and databases, splits each database by percentage, then writes `data/sql_agent_bird_critic/train.jsonl`, `eval.jsonl`, `stats.json`, and the SQLite templates under `data/sql_agent_bird_critic/dbs/`.
+
+## 2. Evaluate The Base Student
+
+Model:
+
+```text
+mlx-community/Qwen3.5-0.8B-MLX-bf16
+```
+
+Command:
+
+Start the student server:
+
+```bash
+uv run mlx_lm.server \
+  --model mlx-community/Qwen3.5-0.8B-MLX-bf16 \
+  --host 127.0.0.1 \
+  --port 8091 \
+  --chat-template-args '{"enable_thinking": false}'
+```
+
+Run the BAML harness eval:
+
+```bash
+uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
+  --model mlx-community/Qwen3.5-0.8B-MLX-bf16 \
+  --base-url http://127.0.0.1:8091/v1 \
+  --data-dir data/sql_agent_bird_critic \
+  --max-turns 8 \
+  --max-new-tokens 1024 \
+  --output outputs/qwen3_5_0_8b_mlx_sql_agent_eval_100.json
+```
+
+Measured result:
+
+```text
+No current BAML-harness result is checked in yet.
+```
+
+Rerun after Notebook 01 writes the percentage split.
+
+## 3. Evaluate Teacher Baselines
+
+### GPT 5.5 Medium
+
+Start the local ChatGPT subscription shim:
 
 ```bash
 uv run python 1-distilling-a-0-8b-tool-calling-agent/serve_chatgpt_shim.py \
@@ -114,95 +201,263 @@ uv run python 1-distilling-a-0-8b-tool-calling-agent/serve_chatgpt_shim.py \
   --port 8080
 ```
 
-Then evaluate GPT 5.5 medium:
+Run eval:
 
 ```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_nestful.py \
-  --backend openai \
+uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
   --model gpt-5.5 \
   --base-url http://127.0.0.1:8080/v1 \
   --reasoning-effort medium \
-  --data-dir data/nestful_calls_le_2 \
-  --output outputs/gpt_5_5_medium_nestful_calls_le_2_eval_parser_v2.json
+  --data-dir data/sql_agent_bird_critic \
+  --max-turns 8 \
+  --max-new-tokens 2048 \
+  --output outputs/gpt_5_5_medium_sql_agent_eval_100.json
 ```
 
-### 3.3 LFM2.5 8B A1B Baseline
+This uses BAML structured output: `draft` plus `output`.
 
-```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_nestful.py \
-  --backend mlx \
-  --model LiquidAI/LFM2.5-8B-A1B-MLX-8bit \
-  --data-dir data/nestful_calls_le_2 \
-  --output outputs/lfm2_5_8b_a1b_mlx_nestful_calls_le_2_eval_parser_v2.json
-```
-
-## 4. Generate Qwen Teacher SFT Rows
-
-Keep the Qwen MLX-LM server from Step 3.1 running.
-
-```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/generate_teacher_sft_rows.py \
-  --backend openai \
-  --model mlx-community/Qwen3.5-35B-A3B-8bit \
-  --base-url http://127.0.0.1:8092/v1 \
-  --data-dir data/nestful_calls_le_2 \
-  --output outputs/qwen3_5_35b_a3b_8bit_mlx_server_nestful_calls_le_2_train_teacher_sft_rows_parser_v2.jsonl
-```
-
-The JSONL keeps only train rows where the teacher exactly matched the reference call sequence.
-
-Output:
+Measured result:
 
 ```text
-outputs/qwen3_5_35b_a3b_8bit_mlx_server_nestful_calls_le_2_train_teacher_sft_rows_parser_v2.jsonl
-outputs/qwen3_5_35b_a3b_8bit_mlx_server_nestful_calls_le_2_train_teacher_sft_rows_parser_v2.report.json
+No current BAML-harness result is checked in yet.
 ```
 
-## 5. Train The Student
+### Qwen3.5 35B A3B 8-bit
+
+Start MLX-LM server:
+
+```bash
+uv run mlx_lm.server \
+  --model mlx-community/Qwen3.5-35B-A3B-8bit \
+  --host 127.0.0.1 \
+  --port 8092 \
+  --chat-template-args '{"enable_thinking": false}'
+```
+
+Run eval:
+
+```bash
+uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
+  --model mlx-community/Qwen3.5-35B-A3B-8bit \
+  --base-url http://127.0.0.1:8092/v1 \
+  --data-dir data/sql_agent_bird_critic \
+  --max-turns 8 \
+  --max-new-tokens 2048 \
+  --output outputs/qwen3_5_35b_a3b_8bit_mlx_server_sql_agent_eval_100.json
+```
+
+This uses BAML structured output: `draft` plus `output`.
+
+Measured result:
+
+```text
+No current BAML-harness result is checked in yet.
+```
+
+### LFM2.5 8B A1B
+
+Start MLX-LM server:
+
+```bash
+uv run mlx_lm.server \
+  --model LiquidAI/LFM2.5-8B-A1B-MLX-8bit \
+  --host 127.0.0.1 \
+  --port 8093
+```
+
+Run eval:
+
+```bash
+uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
+  --model LiquidAI/LFM2.5-8B-A1B-MLX-8bit \
+  --base-url http://127.0.0.1:8093/v1 \
+  --data-dir data/sql_agent_bird_critic \
+  --max-turns 8 \
+  --max-new-tokens 2048 \
+  --output outputs/lfm2_5_8b_a1b_mlx_sql_agent_eval_100.json
+```
+
+Measured result:
+
+```text
+No current BAML-harness result is checked in yet.
+```
+
+## 4. Generate BAML-Canonical Teacher Trace Rows
+
+Current teacher for SFT:
+
+```text
+gpt-5.5 medium
+```
+
+Command:
+
+```bash
+uv run python 1-distilling-a-0-8b-tool-calling-agent/generate_sql_teacher_sft_rows.py \
+  --model gpt-5.5 \
+  --base-url http://127.0.0.1:8080/v1 \
+  --reasoning-effort medium \
+  --data-dir data/sql_agent_bird_critic \
+  --partition train \
+  --max-turns 8 \
+  --max-new-tokens 2048 \
+  --task-timeout-seconds 180 \
+  --output outputs/gpt_5_5_medium_sql_agent_train_baml_sft_trace_rows.jsonl
+```
+
+Teacher row generation also uses the BAML structured output contract.
+
+Previous completed GPT teacher generation, before the percentage-based domain split:
+
+```text
+completed train tasks: 500/500
+successful trajectories: 242/500
+BAML-canonical SFT trace rows: 767
+canonical rows <= 3072 tokens: 737
+canonical rows <= 4096 tokens: 754
+```
+
+The script is resumable and caches after every task. For OpenAI-compatible teachers it isolates each task in a worker process by default, so a stuck subscription call becomes `teacher_runtime_error` and the run continues. The rows are BAML-canonical trace rows at this stage; Notebook 02 decides how to filter them by token length and write the final train/validation file.
+
+## 5. Explore And Filter SFT Rows
+
+Run:
+
+```text
+1-distilling-a-0-8b-tool-calling-agent/notebooks/02_explore_teacher_sft_data.ipynb
+```
+
+Notebook 02 converts successful BAML-canonical trace rows into the final training file:
+
+```text
+outputs/gpt_5_5_medium_sql_agent_train_sft_canonical_3072.jsonl
+outputs/gpt_5_5_medium_sql_agent_train_sft_canonical_3072.report.json
+```
+
+This matters because the harness consumes exactly one JSON action per assistant turn. The final SFT data trains on the canonical `teacher_action`, not on a BAML-canonical teacher blob that might contain extra actions.
+
+Shared defaults:
+
+```text
+max_seq_length: 3072
+batch_size: 1
+gradient_accumulation_steps: 8
+learning_rate: 1e-5
+lora_rank: 16
+lora_alpha: 16
+validation_fraction: 0.05
+seed: 42
+```
+
+At `3072`, the canonical GPT-teacher SFT file keeps `737/767` rows. If a 16GB GPU still OOMs, drop to `2560`, which keeps `679/767` rows.
+
+## 6. Train The Student
+
+### Recommended NVIDIA Path: Unsloth
+
+Install Unsloth on the CUDA/Linux server, then run:
+
+```bash
+uv pip install unsloth
+
+uv run python 1-distilling-a-0-8b-tool-calling-agent/train_unsloth.py \
+  --model unsloth/Qwen3.5-0.8B \
+  --train-path outputs/gpt_5_5_medium_sql_agent_train_sft_canonical_3072.jsonl \
+  --output-dir outputs/qwen3_5_0_8b_unsloth_sql_agent_gpt_teacher_sft_3072
+```
+
+This is the recommended path for a rented RTX 4080 16GB. It uses bf16 LoRA by default. `--load-in-4bit` exists as a fallback if bf16 LoRA does not fit, but it is not the first choice for Qwen3.5.
+
+### Apple Path: MLX-LM
+
+Direct MLX inference uses `enable_thinking=false`. MLX-LM LoRA does not currently expose the same chat-template option in its trainer, so use this path for Apple-side experiments and prefer Unsloth/TRL when you need exact no-thinking SFT parity.
 
 ```bash
 uv run python 1-distilling-a-0-8b-tool-calling-agent/train_mlx.py \
   --model mlx-community/Qwen3.5-0.8B-MLX-bf16 \
-  --train-path outputs/qwen3_5_35b_a3b_8bit_mlx_server_nestful_calls_le_2_train_teacher_sft_rows_parser_v2.jsonl \
-  --output-dir outputs/qwen3_5_0_8b_mlx_nestful_calls_le_2_qwen_teacher_sft_parser_v2_b1 \
-  --batch-size 1 \
-  --grad-accum 1 \
-  --learning-rate 1e-5 \
-  --iters 100 \
-  --max-seq-length 3072
+  --train-path outputs/gpt_5_5_medium_sql_agent_train_sft_canonical_3072.jsonl \
+  --output-dir outputs/qwen3_5_0_8b_mlx_sql_agent_gpt_teacher_sft_3072
 ```
 
-Final adapter:
-
-```text
-outputs/qwen3_5_0_8b_mlx_nestful_calls_le_2_qwen_teacher_sft_parser_v2_b1/adapter/adapters.safetensors
-```
-
-## 6. Evaluate The Trained Student
+### Reference NVIDIA Path: TRL/PEFT
 
 ```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_nestful.py \
-  --backend mlx \
-  --model mlx-community/Qwen3.5-0.8B-MLX-bf16 \
-  --adapter outputs/qwen3_5_0_8b_mlx_nestful_calls_le_2_qwen_teacher_sft_parser_v2_b1/adapter \
-  --data-dir data/nestful_calls_le_2 \
-  --output outputs/qwen3_5_0_8b_mlx_nestful_calls_le_2_qwen_teacher_sft_parser_v2_b1_eval.json
+uv run python 1-distilling-a-0-8b-tool-calling-agent/train_trl.py \
+  --model Qwen/Qwen3.5-0.8B \
+  --train-path outputs/gpt_5_5_medium_sql_agent_train_sft_canonical_3072.jsonl \
+  --output-dir outputs/qwen3_5_0_8b_trl_sql_agent_gpt_teacher_sft_3072
 ```
 
-## Latest Verified Numbers
+TRL is kept because later soft-label/logit distillation will likely need a more standard PyTorch training loop. For Blog 1 hard-token SFT on a 16GB NVIDIA GPU, Unsloth is the preferred path.
 
-Verified on May 30, 2026 with `data/nestful_calls_le_2` and parser v2.
+## 7. Evaluate The Tuned Student
 
-| Run | Exact | Name Sequence | Parse Rate |
-| --- | ---: | ---: | ---: |
-| Qwen3.5-0.8B MLX baseline | 2/103 | 7/103 | 83/103 |
-| Qwen3.5-35B-A3B 8-bit teacher, MLX server | 37/103 | 39/103 | 98/103 |
-| GPT 5.5 medium teacher | 69/103 | 78/103 | 103/103 |
-| LFM2.5-8B-A1B MLX 8-bit baseline | 0/103 | 0/103 | 0/103 |
-| Qwen3.5-0.8B MLX after Qwen-teacher SFT | 43/103 | 53/103 | 99/103 |
+The evaluation harness should still go through BAML. Serve the tuned model through an OpenAI-compatible endpoint, then run the same eval script with `--model` and `--base-url`.
 
-The compact result summary is:
+For an Unsloth/TRL adapter on the GPU server, one option is vLLM with LoRA enabled:
+
+```bash
+python -m vllm.entrypoints.openai.api_server \
+  --model unsloth/Qwen3.5-0.8B \
+  --enable-lora \
+  --lora-modules sql_agent=outputs/qwen3_5_0_8b_unsloth_sql_agent_gpt_teacher_sft_3072/adapter \
+  --served-model-name qwen3_5_0_8b_sql_agent \
+  --port 8094
+```
+
+```bash
+uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
+  --model qwen3_5_0_8b_sql_agent \
+  --base-url http://127.0.0.1:8094/v1 \
+  --data-dir data/sql_agent_bird_critic \
+  --max-turns 8 \
+  --max-new-tokens 1024 \
+  --output outputs/qwen3_5_0_8b_unsloth_sql_agent_gpt_teacher_sft_3072_eval_100.json
+```
+
+For an MLX adapter on the Mac:
+
+```bash
+uv run mlx_lm.server \
+  --model mlx-community/Qwen3.5-0.8B-MLX-bf16 \
+  --adapter-path outputs/qwen3_5_0_8b_mlx_sql_agent_gpt_teacher_sft_3072/adapter \
+  --host 127.0.0.1 \
+  --port 8095 \
+  --chat-template-args '{"enable_thinking": false}'
+```
+
+```bash
+uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
+  --model mlx-community/Qwen3.5-0.8B-MLX-bf16 \
+  --base-url http://127.0.0.1:8095/v1 \
+  --data-dir data/sql_agent_bird_critic \
+  --max-turns 8 \
+  --max-new-tokens 1024 \
+  --output outputs/qwen3_5_0_8b_mlx_sql_agent_gpt_teacher_sft_3072_eval_100.json
+```
+
+Measured result:
 
 ```text
-outputs/blog1_results_summary.json
+No current BAML-harness tuned-student result is checked in yet.
 ```
+
+Fill this in only after rerunning the tuned model through the same BAML structured-output harness.
+
+## Result Summary
+
+| Run | Success | Notes |
+| --- | ---: | --- |
+| Qwen3.5-0.8B base student | rerun | BAML harness |
+| LFM2.5-8B-A1B baseline | rerun | BAML harness |
+| Qwen3.5-35B-A3B teacher | rerun | BAML harness |
+| GPT 5.5 medium teacher | rerun | BAML harness |
+| Qwen3.5-0.8B tuned student | rerun | BAML harness |
+
+## Next Fixes
+
+- Run the 737-row canonical 3072-token SFT file through the recommended Unsloth recipe.
+- Add a format-only warmup dataset so the student reliably emits JSON actions before learning SQL.
+- Compare Unsloth against the TRL reference path on the same config.
+- Consider training more LoRA layers or a stronger small student.

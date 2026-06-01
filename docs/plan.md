@@ -1,68 +1,111 @@
 # Distillation Blog Plan
 
-The first blog now uses one deterministic nested function-calling dataset that can carry the whole distillation series.
+## Direction
 
-## Dataset Choice
+The series is centered on a deterministic multi-turn SQL-agent harness. Earlier one-turn function-plan datasets were dropped from the main story because the model did not receive observations and act again.
 
-Dataset:
+Blog 1 now uses:
 
-- `ibm-research/nestful`
-- 1,861 total examples
-- published as one split, so we create a deterministic local `80/20` train/eval split
-- default split seed: `42`
-- Blog 1 slice: reference call sequence length `<= 2`
-- about 506 train rows and 103 eval rows for Blog 1
+```text
+birdsql/six-gym-sqlite
+```
 
-Task:
+The harness is:
 
-Given a user query and a catalog of available functions, the model must output a JSON sequence of function calls. Later calls can reference earlier outputs with labels such as `$var_1.result$`.
+```text
+user SQL issue
+-> BAML model call returns {draft, output}
+-> inspect_schema / run_sql_query / submit_sql
+-> SQLite result or error
+-> next BAML model call
+-> deterministic test-case score
+```
 
-Why this is cleaner:
+No LLM user simulator. No LLM judge. The environment is SQLite plus test cases.
 
-- It is normal function calling, not shopping/recommender behavior and not a UI action dataset.
-- It is focused: the skill is nested/sequential API calling with variable wiring.
-- It is deterministic and does not need an LLM user simulator.
-- The `<= 2` slice is small enough to run often, but still leaves room for the 0.8B student to improve.
-- It can support the whole series: hard-token SFT, logit distillation, on-policy correction, and later reward-based training using executable correctness.
+## Blog 1 Question
 
-## Blog 1
+> Can a 0.8B model learn to behave as a small SQL tool-use agent from stronger teacher trajectories?
 
-Question:
+## Current Models
 
-> Can a 0.8B model learn short nested function-call sequencing from a stronger teacher?
+- Student: `mlx-community/Qwen3.5-0.8B-MLX-bf16`
+- Local teacher baseline: `mlx-community/Qwen3.5-35B-A3B-8bit` through `mlx_lm.server`
+- GPT teacher baseline and first SFT teacher: `gpt-5.5` with reasoning effort `medium`
+- Additional baseline: `LiquidAI/LFM2.5-8B-A1B-MLX-8bit`
+- Qwen chat-template thinking is disabled for student inference, Qwen teacher requests, and SFT tokenization.
+- OpenAI-compatible inference now goes through BAML with a short `draft` field and one executable `output` action.
 
-Main models:
+## Current Scripts
 
-- Student: `mlx-community/Qwen3.5-0.8B-MLX-bf16` for the verified local Blog 1 path.
-- Main teacher: `mlx-community/Qwen3.5-35B-A3B-8bit` served through `mlx_lm.server`.
-- Baseline teachers only: `gpt-5.5` with reasoning effort `medium` through the local ChatGPT subscription shim, and `LiquidAI/LFM2.5-8B-A1B-MLX-8bit` through MLX.
+- `notebooks/01_explore_sql_agent_benchmark.ipynb`: explores the benchmark, filters to a focused `Query` database cluster, creates a percentage-based stratified train/eval split by database, and writes prepared data.
+- `eval_sql_agent.py`: runs a served model through the BAML SQL-agent harness.
+- `generate_sql_teacher_sft_rows.py`: runs the teacher on train tasks and writes BAML-canonical SFT trace rows from successful trajectories.
+- `notebooks/02_explore_teacher_sft_data.ipynb`: explores BAML-canonical SFT trace rows, canonicalizes one-action targets, filters by token length, and writes the final SFT file.
+- `train_unsloth.py`: recommended NVIDIA LoRA path for a 16GB GPU, consuming the final SFT file from Notebook 02.
+- `train_mlx.py`: Apple/MLX-LM LoRA path over the same final SFT file.
+- `train_trl.py`: reference TRL/PEFT path for later soft-label/logit experiments.
 
-Blog 1 scripts:
+## Previous Measured Results
 
-- `prepare_nestful.py`: downloads and normalizes `ibm-research/nestful`.
-- `eval_nestful.py`: runs exact nested-call sequence eval with HF, MLX, or OpenAI-compatible inference.
-- `generate_teacher_sft_rows.py`: runs the teacher on the train split and keeps exact successful call sequences.
-- `train_mlx.py`: MLX-LM LoRA path used in the verified Blog 1 run.
-- `train_trl.py` and `train_unsloth.py`: kept as later comparison paths, not part of the current verified runbook.
+These are from the earlier fixed-count split. After the percentage-based domain split is rerun, replace this table with the new baseline numbers.
 
-Metrics:
+| Run | Success | Submitted | Parse Failures | Max-Turn Failures |
+| --- | ---: | ---: | ---: | ---: |
+| Qwen3.5-0.8B base student | 4/100 | 19/100 | 76 | 5 |
+| LFM2.5-8B-A1B baseline | 0/100 | 5/100 | 93 | 2 |
+| Qwen3.5-35B-A3B 8-bit teacher | 33/100 | 81/100 | 5 | 14 |
+| GPT 5.5 medium teacher | 51/100 | 99/100 | 0 | 1 |
+| Qwen3.5-0.8B after first partial GPT SFT | 1/100 | 7/100 | 92 | 1 |
 
-1. Exact sequence accuracy: function names, labels, and arguments all match.
-2. Name-sequence accuracy: the right functions are selected in the right order.
-3. Parse rate: the model emitted valid JSON in the expected structure.
+## Previous Teacher SFT Data
 
-Current verified results on the `<= 2` eval split with parser v2:
+This was generated from the earlier fixed-count split. After rerunning Notebook 01 with the percentage-based domain split, regenerate teacher rows from the new train file.
 
-- Qwen3.5-0.8B MLX student before SFT: `2/103` exact, `7/103` name-sequence, `83/103` parseable.
-- Qwen3.5-35B-A3B 8-bit MLX-server teacher: `37/103` exact, `39/103` name-sequence, `98/103` parseable.
-- GPT 5.5 medium teacher baseline: `69/103` exact, `78/103` name-sequence, `103/103` parseable.
-- LFM2.5-8B-A1B MLX 8-bit baseline: `0/103` exact, `0/103` name-sequence, `0/103` parseable.
-- Qwen3.5-0.8B MLX student after Qwen-teacher SFT: `43/103` exact, `53/103` name-sequence, `99/103` parseable.
+```text
+train tasks completed: 500/500
+successful trajectories: 242/500
+BAML-canonical SFT trace rows: 767
+canonical rows <= 2560 tokens: 679
+canonical rows <= 3072 tokens: 737
+canonical rows <= 4096 tokens: 754
+```
 
-Teacher train generation with the Qwen teacher kept `156/506` exact rows for SFT.
+Recommended training config:
 
-## Later Blogs
+```text
+Unsloth bf16 LoRA on NVIDIA first
+max seq length: 3072
+batch size: 1
+gradient accumulation: 8
+learning rate: 1e-5
+lora rank: 16
+lora alpha: 16
+```
 
-2. Soft-label/logit distillation on the same NESTFUL prompts and completions.
-3. On-policy distillation: let the student produce call sequences, then use teacher/verifier feedback to create corrections.
-4. RL/GRPO-style training: use executable answer correctness from NESTFUL functions as reward.
+Earlier partial MLX SFT result:
+
+```text
+base student: 4/100
+partial tuned student: 1/100
+```
+
+That negative result showed the pipeline works but the first data/training recipe was not good enough.
+
+## Next Technical Fixes
+
+1. Make GPT teacher generation robust enough to finish the full prepared train split, or switch train generation to a local teacher that cannot hang on subscription streaming.
+2. Clean successful teacher traces so each SFT target is the canonical next action expected by the harness, not a non-canonical multi-action teacher blob.
+3. For Blog 1, prefer shorter verified successful trajectories when multiple teacher traces solve the same task. The point is not to truncate context blindly; it is to train the student on clean, replayable paths with fewer wasted tool calls and fewer tokens.
+4. Add a format-only warmup corpus so the student reliably emits exactly one JSON action per turn.
+5. Train on many more successful trajectories.
+6. Try Unsloth on rented NVIDIA GPUs for faster iteration; keep TRL as the reference path for later KD work.
+7. Consider more LoRA layers or a stronger student model.
+
+## Future Posts
+
+1. **Blog 1:** hard-token offline distillation in the SQL-agent harness. Start with verifier-filtered successful teacher traces, and when possible select shorter successful traces so the small model learns the clean execution path rather than the teacher's wandering.
+2. **Blog 2:** trajectory pruning and compaction for small agent models. Take successful traces, remove or summarize redundant observations, preserve the state needed for the next action, replay or verify the compacted trajectory, then train on the compact state/action pairs.
+3. **Blog 3:** soft-label/logit distillation on the same compacted teacher actions.
+4. **Blog 4:** on-policy distillation: let the student act, collect its bad states, and ask the teacher/verifier for corrections.
+5. **Blog 5:** RL/GRPO-style training using SQLite test-case success as reward.

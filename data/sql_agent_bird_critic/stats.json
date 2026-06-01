@@ -1,0 +1,12 @@
+{
+  "dataset": "birdsql/six-gym-sqlite",
+  "seed": 42,
+  "train_size": 500,
+  "eval_size": 100,
+  "db_count": 13,
+  "categories": {
+    "Personalization": 101,
+    "Query": 371,
+    "Management": 128
+  }
+}

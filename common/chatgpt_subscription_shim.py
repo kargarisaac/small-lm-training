@@ -78,7 +78,7 @@ def stream_chatgpt_lines(
         authenticator.get_account_id(),
         ensure_chatgpt_session_id({"litellm_call_id": f"distillation-blogs-{uuid4()}"}),
     )
-    with httpx.stream("POST", f"{api_base}/responses", headers=headers, json=body, timeout=300) as response:
+    with httpx.stream("POST", f"{api_base}/responses", headers=headers, json=body, timeout=90) as response:
         if response.status_code >= 400:
             detail = response.read().decode("utf-8", errors="replace")[:1000]
             raise RuntimeError(f"ChatGPT subscription request failed: {response.status_code} {detail}")

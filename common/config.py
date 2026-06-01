@@ -11,16 +11,27 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
 
-NESTFUL_DATASET = "ibm-research/nestful"
-NESTFUL_SPLIT_SEED = 42
-NESTFUL_EVAL_FRACTION = 0.2
+SQL_AGENT_DATASET = "birdsql/six-gym-sqlite"
+SQL_AGENT_SPLIT_SEED = 42
+SQL_AGENT_EVAL_FRACTION = 0.2
 HF_STUDENT_MODEL = "Qwen/Qwen3.5-0.8B"
 MLX_STUDENT_MODEL = "mlx-community/Qwen3.5-0.8B-MLX-bf16"
-UNSLOTH_STUDENT_MODEL = "Qwen/Qwen3.5-0.8B"
+UNSLOTH_STUDENT_MODEL = "unsloth/Qwen3.5-0.8B"
 QWEN_TEACHER_MODEL = "mlx-community/Qwen3.5-35B-A3B-8bit"
 LFM_TEACHER_MODEL = "LiquidAI/LFM2.5-8B-A1B-MLX-8bit"
 GPT_TEACHER_MODEL = "gpt-5.5"
 GPT_TEACHER_REASONING_EFFORT = "medium"
+QWEN_ENABLE_THINKING = False
+SFT_MAX_SEQ_LENGTH = 3072
+SFT_BATCH_SIZE = 1
+SFT_GRAD_ACCUM = 8
+SFT_LEARNING_RATE = 1e-5
+SFT_LORA_RANK = 16
+SFT_LORA_ALPHA = 16
+SFT_MLX_NUM_LAYERS = 16
+SFT_VALIDATION_FRACTION = 0.05
+SFT_SEED = 42
+SFT_TARGET_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
 
 def filename_slug(value: str) -> str:
