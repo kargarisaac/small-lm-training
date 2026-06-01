@@ -57,6 +57,8 @@ class EvalSummary:
     sql_execution_errors: int
     max_turn_failures: int
     parse_failures: int
+    repeated_action_failures: int
+    runtime_errors: int
     average_turns: float
 
     @property
@@ -187,6 +189,8 @@ def run_task(
 ) -> dict[str, Any]:
     messages = initial_messages(row)
     trace = []
+    schema_observation: str | None = None
+    previous_action_key: str | None = None
     with task_database(row, data_dir) as db_path:
         conn = sqlite3.connect(db_path)
         try:
@@ -203,8 +207,18 @@ def run_task(
                     trace_item["stop_reason"] = "parse_failure"
                     trace.append(trace_item)
                     return task_result(row, trace, "parse_failure", False)
+                action_key = json.dumps(action, sort_keys=True, ensure_ascii=False)
+                if action_key == previous_action_key:
+                    trace_item["stop_reason"] = "repeated_action"
+                    trace.append(trace_item)
+                    return task_result(row, trace, "repeated_action", False)
+                previous_action_key = action_key
                 if action["action"] == "inspect_schema":
-                    observation = schema_text(conn)
+                    if schema_observation is None:
+                        schema_observation = schema_text(conn)
+                        observation = schema_observation
+                    else:
+                        observation = "Schema was already provided earlier in this task. Use the previous schema observation instead of calling inspect_schema again."
                     trace_item["observation"] = observation
                     messages.append({"role": "user", "content": environment_message(observation)})
                     trace_item["stop_reason"] = "tool_observation"
@@ -454,6 +468,8 @@ def summarize_results(results: list[dict[str, Any]]) -> EvalSummary:
         sql_execution_errors=sum(any((item.get("score") or {}).get("error", "").startswith("execution_error") for item in row["trace"]) for row in results),
         max_turn_failures=sum(row["stop_reason"] == "max_turns" for row in results),
         parse_failures=sum(row["stop_reason"] == "parse_failure" for row in results),
+        repeated_action_failures=sum(row["stop_reason"] == "repeated_action" for row in results),
+        runtime_errors=sum(row["stop_reason"].endswith("runtime_error") or row["stop_reason"] == "runtime_error" for row in results),
         average_turns=sum(row["turns"] for row in results) / total if total else 0.0,
     )
 

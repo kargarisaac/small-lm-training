@@ -1,12 +1,38 @@
 {
   "dataset": "birdsql/six-gym-sqlite",
   "seed": 42,
-  "train_size": 500,
-  "eval_size": 100,
-  "db_count": 13,
+  "task_category": "Query",
+  "db_filter": [
+    "netflix",
+    "movie_3",
+    "books",
+    "chinook"
+  ],
+  "eval_fraction": 0.2,
+  "source_size": 5000,
+  "candidate_size": 1099,
+  "train_size": 879,
+  "eval_size": 220,
+  "db_count": 4,
+  "candidate_db_counts": {
+    "books": 282,
+    "chinook": 251,
+    "movie_3": 273,
+    "netflix": 293
+  },
+  "train_db_counts": {
+    "books": 226,
+    "chinook": 201,
+    "movie_3": 218,
+    "netflix": 234
+  },
+  "eval_db_counts": {
+    "books": 56,
+    "chinook": 50,
+    "movie_3": 55,
+    "netflix": 59
+  },
   "categories": {
-    "Personalization": 101,
-    "Query": 371,
-    "Management": 128
+    "Query": 1099
   }
 }

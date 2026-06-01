@@ -34,6 +34,12 @@ def main() -> None:
     args = parser.parse_args()
 
     from datasets import Dataset
+
+    if not args.dry_run:
+        try:
+            from unsloth import FastLanguageModel, is_bfloat16_supported
+        except ImportError as error:
+            raise RuntimeError("Install Unsloth on the CUDA/Linux server first. Example: uv pip install unsloth") from error
     from transformers import AutoTokenizer, DataCollatorForSeq2Seq
 
     if args.train_path is None:
@@ -67,10 +73,6 @@ def main() -> None:
     if args.dry_run:
         return
 
-    try:
-        from unsloth import FastLanguageModel, is_bfloat16_supported
-    except ImportError as error:
-        raise RuntimeError("Install Unsloth on the CUDA/Linux server first. Example: uv pip install unsloth") from error
     from trl import SFTConfig, SFTTrainer
 
     model, tokenizer = FastLanguageModel.from_pretrained(

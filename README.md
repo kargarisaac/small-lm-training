@@ -22,7 +22,7 @@ The harness loop is:
 question -> model JSON action -> SQLite tool result -> next model action -> submit SQL -> tests
 ```
 
-Current full eval results on the 100-row held-out split:
+Previous full eval results on the old 100-row held-out split:
 
 | Run | Success |
 | --- | ---: |
@@ -32,7 +32,7 @@ Current full eval results on the 100-row held-out split:
 | GPT 5.5 medium teacher | 51/100 |
 | Qwen3.5-0.8B after first partial GPT-SFT run | 1/100 |
 
-The first partial SFT attempt did **not** improve the student. The next training recipe uses the completed GPT teacher set: 242 successful trajectories, 767 SFT rows, canonical one-action labels, and a 3072-token default that keeps 737 rows. Blog 1 now treats Unsloth bf16 LoRA as the recommended NVIDIA path for a 16GB GPU, with MLX and TRL kept as Apple/reference paths.
+The first partial SFT attempt did **not** improve the student. The next training recipe uses the completed GPT teacher set: 242 successful trajectories, 767 SFT rows, canonical one-action labels, and a 3072-token default that keeps 737 rows. Blog 1 now treats vLLM as the NVIDIA serving path and Unsloth bf16 LoRA as the recommended NVIDIA training path for a 16GB GPU, with MLX and TRL kept as Apple/reference paths.
 
 ## Folders
 

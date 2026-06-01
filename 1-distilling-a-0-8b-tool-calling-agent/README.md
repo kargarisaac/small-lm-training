@@ -60,7 +60,7 @@ The default BAML client for `SqlAgentNextAction` is:
 MlxCommunityQwen35_08bMlxBf16
 ```
 
-Start it before using the BAML VSCode playground or `baml-cli test`:
+On Apple Silicon, start the MLX server before using the BAML VSCode playground or `baml-cli test`:
 
 ```bash
 uv run mlx_lm.server \
@@ -69,6 +69,24 @@ uv run mlx_lm.server \
   --port 8091 \
   --chat-template-args '{"enable_thinking": false}'
 ```
+
+On NVIDIA/CUDA, serve the Hugging Face model through vLLM instead. Install vLLM once as a user-level `uv` tool so all projects can reuse the same isolated vLLM command without sharing vLLM's stricter CUDA dependency set with each notebook or training environment:
+
+```bash
+uv tool install --python 3.12 "vllm>=0.22.0"
+
+VLLM_USE_FLASHINFER_SAMPLER=0 vllm serve Qwen/Qwen3.5-0.8B \
+  --host 127.0.0.1 \
+  --port 8091 \
+  --served-model-name Qwen/Qwen3.5-0.8B \
+  --max-model-len 32768 \
+  --gpu-memory-utilization 0.85 \
+  --default-chat-template-kwargs '{"enable_thinking": false}'
+```
+
+`VLLM_USE_FLASHINFER_SAMPLER=0` avoids requiring a system `nvcc` install on machines where the vLLM wheel and NVIDIA driver are present but `/usr/local/cuda` is not.
+
+`Qwen/Qwen3.5-0.8B` uses Qwen3.5's GDN/linear-attention path. If vLLM reports a GDN or Triton CUDA launch failure on an Ada GPU such as an RTX 4080, stop retrying that same process; reset or reboot the GPU before starting another CUDA server, then use a newer vLLM build or a non-vLLM Transformers server for this architecture.
 
 Then run:
 
@@ -81,13 +99,14 @@ Configured BAML clients:
 | BAML client | Model | Server to start |
 | --- | --- | --- |
 | `MlxCommunityQwen35_08bMlxBf16` | `mlx-community/Qwen3.5-0.8B-MLX-bf16` | `mlx_lm.server` on `8091` |
+| dynamic notebook/eval client | `Qwen/Qwen3.5-0.8B` | vLLM OpenAI server on `8091` |
 | `MlxCommunityQwen35_35bA3b8bit` | `mlx-community/Qwen3.5-35B-A3B-8bit` | `mlx_lm.server` on `8092` |
 | `LiquidAiLfm25_8bA1bMlx8bit` | `LiquidAI/LFM2.5-8B-A1B-MLX-8bit` | `mlx_lm.server` on `8093` |
 | `Gpt55Medium` | `gpt-5.5` | local ChatGPT shim on `8080` |
 | `Qwen35_08bSqlAgentVllm` | `qwen3_5_0_8b_sql_agent` | vLLM OpenAI server on `8094` |
 | `MlxCommunityQwen35_08bMlxBf16Lora` | `mlx-community/Qwen3.5-0.8B-MLX-bf16` with adapter | `mlx_lm.server --adapter-path ...` on `8095` |
 
-The Python eval scripts can still choose a model dynamically with `--model` and `--base-url`. The BAML VSCode extension uses the static client selected in `baml_src/sql_agent.baml`, so that server must be running first.
+The Python eval scripts and Notebook 01 choose a model dynamically with `--model`/`model_name` and `--base-url`/`base_url`, so they can use either MLX or vLLM. The BAML VSCode extension uses the static client selected in `baml_src/sql_agent.baml`, so that server must be running first.
 
 ## Serving Versus Training
 
@@ -150,15 +169,54 @@ It filters to the selected task category and databases, splits each database by 
 
 ## 2. Evaluate The Base Student
 
-Model:
+### NVIDIA Path: vLLM
 
-```text
-mlx-community/Qwen3.5-0.8B-MLX-bf16
+Serve the Hugging Face model with the OpenAI-compatible vLLM server:
+
+```bash
+VLLM_USE_FLASHINFER_SAMPLER=0 vllm serve Qwen/Qwen3.5-0.8B \
+  --host 127.0.0.1 \
+  --port 8091 \
+  --served-model-name Qwen/Qwen3.5-0.8B \
+  --max-model-len 32768 \
+  --gpu-memory-utilization 0.85 \
+  --default-chat-template-kwargs '{"enable_thinking": false}'
 ```
 
-Command:
+The important serving/eval numbers are different budgets:
 
-Start the student server:
+```text
+--max-model-len 32768
+  vLLM's total context window per request: prompt tokens plus generated tokens.
+  SQL-agent prompts can become large after schema observations, so use a larger
+  server window when allowing 4096 generated tokens.
+
+--max-new-tokens 4096
+  Maximum generated tokens for one assistant action. The model usually emits
+  far less because each turn should be one JSON decision, but this leaves enough
+  room for long final SQL submissions.
+
+--max-turns 8
+  Maximum SQL-agent loop steps for one benchmark row. It is not a token setting.
+```
+
+For every model call, `prompt_tokens + max_new_tokens` must fit inside `max_model_len`. Do not pair `--max-model-len 4096` with `--max-new-tokens 4096`; that leaves no space for the prompt and will fail even if the server is reachable.
+
+Run the BAML harness eval:
+
+```bash
+uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
+  --model Qwen/Qwen3.5-0.8B \
+  --base-url http://127.0.0.1:8091/v1 \
+  --data-dir data/sql_agent_bird_critic \
+  --max-turns 8 \
+  --max-new-tokens 4096 \
+  --output outputs/qwen3_5_0_8b_vllm_sql_agent_eval.json
+```
+
+Notebook 01 uses the same local server in its optional live one-task run. The notebook writes `train.jsonl`, `eval.jsonl`, `stats.json`, and downloads the SQLite templates before the live harness call needs them.
+
+### Apple Path: MLX
 
 ```bash
 uv run mlx_lm.server \
@@ -168,8 +226,6 @@ uv run mlx_lm.server \
   --chat-template-args '{"enable_thinking": false}'
 ```
 
-Run the BAML harness eval:
-
 ```bash
 uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
   --model mlx-community/Qwen3.5-0.8B-MLX-bf16 \
@@ -177,7 +233,7 @@ uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
   --data-dir data/sql_agent_bird_critic \
   --max-turns 8 \
   --max-new-tokens 1024 \
-  --output outputs/qwen3_5_0_8b_mlx_sql_agent_eval_100.json
+  --output outputs/qwen3_5_0_8b_mlx_sql_agent_eval.json
 ```
 
 Measured result:
@@ -211,7 +267,7 @@ uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
   --data-dir data/sql_agent_bird_critic \
   --max-turns 8 \
   --max-new-tokens 2048 \
-  --output outputs/gpt_5_5_medium_sql_agent_eval_100.json
+  --output outputs/gpt_5_5_medium_sql_agent_eval.json
 ```
 
 This uses BAML structured output: `draft` plus `output`.
@@ -243,7 +299,7 @@ uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
   --data-dir data/sql_agent_bird_critic \
   --max-turns 8 \
   --max-new-tokens 2048 \
-  --output outputs/qwen3_5_35b_a3b_8bit_mlx_server_sql_agent_eval_100.json
+  --output outputs/qwen3_5_35b_a3b_8bit_mlx_server_sql_agent_eval.json
 ```
 
 This uses BAML structured output: `draft` plus `output`.
@@ -274,7 +330,7 @@ uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
   --data-dir data/sql_agent_bird_critic \
   --max-turns 8 \
   --max-new-tokens 2048 \
-  --output outputs/lfm2_5_8b_a1b_mlx_sql_agent_eval_100.json
+  --output outputs/lfm2_5_8b_a1b_mlx_sql_agent_eval.json
 ```
 
 Measured result:
@@ -413,7 +469,7 @@ uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
   --data-dir data/sql_agent_bird_critic \
   --max-turns 8 \
   --max-new-tokens 1024 \
-  --output outputs/qwen3_5_0_8b_unsloth_sql_agent_gpt_teacher_sft_3072_eval_100.json
+  --output outputs/qwen3_5_0_8b_unsloth_sql_agent_gpt_teacher_sft_3072_eval.json
 ```
 
 For an MLX adapter on the Mac:
@@ -434,7 +490,7 @@ uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
   --data-dir data/sql_agent_bird_critic \
   --max-turns 8 \
   --max-new-tokens 1024 \
-  --output outputs/qwen3_5_0_8b_mlx_sql_agent_gpt_teacher_sft_3072_eval_100.json
+  --output outputs/qwen3_5_0_8b_mlx_sql_agent_gpt_teacher_sft_3072_eval.json
 ```
 
 Measured result:
