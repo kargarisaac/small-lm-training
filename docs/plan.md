@@ -42,9 +42,7 @@ No LLM user simulator. No LLM judge. The environment is SQLite plus test cases.
 - `eval_sql_agent.py`: runs a served model through the BAML SQL-agent harness.
 - `generate_sql_teacher_sft_rows.py`: runs the teacher on train tasks and writes BAML-canonical SFT trace rows from successful trajectories.
 - `notebooks/02_explore_teacher_sft_data.ipynb`: explores BAML-canonical SFT trace rows, canonicalizes one-action targets, filters by token length, and writes the final SFT file.
-- `train_unsloth.py`: recommended NVIDIA LoRA path for a 16GB GPU, consuming the final SFT file from Notebook 02.
-- `train_mlx.py`: Apple/MLX-LM LoRA path over the same final SFT file.
-- `train_trl.py`: reference TRL/PEFT path for later soft-label/logit experiments.
+- `train_unsloth.py`: one Unsloth-style LoRA path. It uses MLX-Tune on Apple Silicon and core Unsloth on CUDA, consuming the final SFT file from Notebook 02.
 
 ## Previous Measured Results
 
@@ -71,7 +69,7 @@ canonical rows <= 3072 tokens: 737
 canonical rows <= 4096 tokens: 754
 ```
 
-Recommended training config:
+Recommended CUDA training config:
 
 ```text
 Unsloth bf16 LoRA on NVIDIA first
@@ -92,6 +90,14 @@ partial tuned student: 1/100
 
 That negative result showed the pipeline works but the first data/training recipe was not good enough.
 
+Current Mac training path uses the same `train_unsloth.py` entrypoint through MLX-Tune. In this environment the upstream MLX-Tune native trainer accepted `gradient_accumulation_steps` but did not forward it into MLX-LM `TrainingArgs`; we patched the installed package and `train_unsloth.py` now checks for that patch before Mac training. MLX-LM `iters` are microsteps, not optimizer updates, so gradient accumulation changes update frequency but does not reduce the number of examples processed in one pass. Treat Mac sequence length as an explicit speed/data-coverage tradeoff:
+
+```text
+2048 tokens: 471/721 rows fit
+2560 tokens: 615/721 rows fit
+3072 tokens: 721/721 rows fit but currently hits the Metal allocation limit
+```
+
 ## Next Technical Fixes
 
 1. Make GPT teacher generation robust enough to finish the full prepared train split, or switch train generation to a local teacher that cannot hang on subscription streaming.
@@ -99,7 +105,7 @@ That negative result showed the pipeline works but the first data/training recip
 3. For Blog 1, prefer shorter verified successful trajectories when multiple teacher traces solve the same task. The point is not to truncate context blindly; it is to train the student on clean, replayable paths with fewer wasted tool calls and fewer tokens.
 4. Add a format-only warmup corpus so the student reliably emits exactly one JSON action per turn.
 5. Train on many more successful trajectories.
-6. Try Unsloth on rented NVIDIA GPUs for faster iteration; keep TRL as the reference path for later KD work.
+6. Keep the single `train_unsloth.py` training entrypoint portable: MLX-Tune on Apple Silicon now, core Unsloth on CUDA later.
 7. Consider more LoRA layers or a stronger student model.
 
 ## Future Posts

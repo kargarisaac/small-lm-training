@@ -372,7 +372,7 @@ The important detail is that we only keep rows from trajectories that fully pass
 
 ## Training
 
-The recommended NVIDIA training path uses Unsloth bf16 LoRA. MLX is kept as an Apple-side experiment path:
+The training path is one Unsloth-style script: MLX-Tune on this Mac, core Unsloth on NVIDIA later.
 
 ```text
 max_seq_length: 3072
@@ -383,79 +383,70 @@ lora_rank: 16
 lora_alpha: 16
 ```
 
-For a rented RTX 4080 16GB server:
+On this Mac, the same Unsloth-style script imports MLX-Tune:
+
+```bash
+uv pip install mlx-tune
+
+uv run python 1-distilling-a-0-8b-tool-calling-agent/train_unsloth.py \
+  --train-path outputs/gpt_5_5_medium_sql_agent_train_sft_canonical_3072.jsonl \
+  --output-dir outputs/qwen3_5_0_8b_mlx_tune_sql_agent_gpt_teacher_sft_3072 \
+  --learning-rate 1e-4
+```
+
+Later, the same script can move to CUDA by switching the backend and model:
 
 ```bash
 uv pip install unsloth
 
 uv run python 1-distilling-a-0-8b-tool-calling-agent/train_unsloth.py \
+  --backend cuda \
   --model unsloth/Qwen3.5-0.8B \
   --train-path outputs/gpt_5_5_medium_sql_agent_train_sft_canonical_3072.jsonl \
-  --output-dir outputs/qwen3_5_0_8b_unsloth_sql_agent_gpt_teacher_sft_3072
+  --output-dir outputs/qwen3_5_0_8b_unsloth_sql_agent_gpt_teacher_sft_3072 \
+  --learning-rate 1e-4
 ```
 
-For Apple/MLX:
-
-Direct MLX inference uses the no-thinking Qwen chat template. MLX-LM LoRA does not expose that same chat-template flag in its trainer, so I treat MLX training as an Apple experiment path and use Unsloth when I need exact no-thinking SFT parity.
-
-```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/train_mlx.py \
-  --model mlx-community/Qwen3.5-0.8B-MLX-bf16 \
-  --train-path outputs/gpt_5_5_medium_sql_agent_train_sft_canonical_3072.jsonl \
-  --output-dir outputs/qwen3_5_0_8b_mlx_sql_agent_gpt_teacher_sft_3072
-```
-
-In code, the training script calls MLX-LM directly. It does not shell out to a command string:
+The core code shape stays the same:
 
 ```python
-from mlx_lm import lora
+from mlx_tune import FastLanguageModel, SFTConfig, SFTTrainer, train_on_responses_only
 
-lora_args = dict(lora.CONFIG_DEFAULTS)
-lora_args.update(
-    train=True,
-    model=args.model,
-    data=str(mlx_data_dir),
-    adapter_path=str(adapter_dir),
-    iters=iters,
-    batch_size=args.batch_size,
-    grad_accumulation_steps=args.grad_accum,
-    learning_rate=args.learning_rate,
-    num_layers=args.num_layers,
-    max_seq_length=args.max_seq_length,
-    lora_parameters={"rank": args.lora_rank, "dropout": 0.0, "scale": args.lora_alpha},
-    mask_prompt=True,
-    grad_checkpoint=True,
+model, tokenizer = FastLanguageModel.from_pretrained(
+    model_name="mlx-community/Qwen3.5-0.8B-MLX-bf16",
+    max_seq_length=3072,
 )
-
-lora.run(types.SimpleNamespace(**lora_args))
+model = FastLanguageModel.get_peft_model(model, r=16, lora_alpha=16)
+trainer = SFTTrainer(model=model, tokenizer=tokenizer, train_dataset=train_rows, args=SFTConfig(max_seq_length=3072))
+trainer = train_on_responses_only(trainer, response_part="<|im_start|>assistant\n")
+trainer.train()
 ```
 
-The earlier partial MLX run trained successfully but did not improve the model:
-
-```text
-BAML-canonical SFT trace rows: 148
-rows <= 4096 tokens: 141
-train rows: 134
-validation rows: 7
-final train loss: 0.139
-final validation loss: 0.122
-peak memory: 114.820 GB
-```
-
-That was useful as a failure, not as the final recipe. The next run uses the full teacher dataset, canonical one-action labels, and a shorter 3072-token default that is more realistic on a 16GB NVIDIA GPU.
+This is not a parser trick or a benchmark-specific workaround. It is a portability choice: MLX-Tune on the Mac, core Unsloth on NVIDIA, one training script.
 
 ## Tuned Student Eval
 
-The tuned model should be evaluated through the same BAML harness. Serve the adapter through an OpenAI-compatible endpoint, then run:
+The tuned model should be evaluated through the same BAML harness. On this Mac, serve the MLX-Tune adapter with `mlx_lm.server`:
+
+```bash
+uv run mlx_lm.server \
+  --model mlx-community/Qwen3.5-0.8B-MLX-bf16 \
+  --adapter-path outputs/qwen3_5_0_8b_mlx_tune_sql_agent_gpt_teacher_sft_3072/adapter \
+  --host 127.0.0.1 \
+  --port 8095 \
+  --chat-template-args '{"enable_thinking": false}'
+```
+
+Then run:
 
 ```bash
 uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
-  --model qwen3_5_0_8b_sql_agent \
-  --base-url http://127.0.0.1:8094/v1 \
+  --model mlx-community/Qwen3.5-0.8B-MLX-bf16 \
+  --base-url http://127.0.0.1:8095/v1 \
   --data-dir data/sql_agent_bird_critic \
   --max-turns 8 \
   --max-new-tokens 1024 \
-  --output outputs/qwen3_5_0_8b_unsloth_sql_agent_gpt_teacher_sft_3072_eval.json
+  --output outputs/qwen3_5_0_8b_mlx_tune_sql_agent_gpt_teacher_sft_3072_eval.json
 ```
 
 Result:

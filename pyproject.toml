@@ -7,15 +7,18 @@ requires-python = ">=3.11"
 dependencies = [
     "accelerate>=1.13.0",
     "baml-py>=0.222.0",
-    "datasets==4.3.0",
+    "datasets>=2.14,<4",
     "httpx>=0.28.1",
     "ipykernel>=7.2.0",
     "jupyter>=1.1.1",
     "litellm>=1.86.1",
     "mlx-lm>=0.31.3",
+    "mlx-tune>=0.4.7",
     "peft>=0.18.0",
     "torch==2.10.0",
     "transformers==5.5.0",
-    "trl==0.24.0",
     "unsloth==2026.5.10",
 ]
+
+[tool.uv.sources]
+mlx-tune = { git = "https://github.com/ARahim3/mlx-tune.git" }

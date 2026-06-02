@@ -116,8 +116,8 @@ Training options:
 
 | Machine | Typical trainer | Used for |
 | --- | --- | --- |
-| Mac | `mlx-lm` or `mlx-tune` | local LoRA experiments |
-| NVIDIA | Unsloth bf16 LoRA | main training runs |
+| Mac | MLX-Tune through `train_unsloth.py` | local Unsloth-style LoRA training |
+| NVIDIA | core Unsloth through `train_unsloth.py` | later CUDA LoRA training |
 
 For Blog 1 hard-token SFT, we train on canonical BAML decisions:
 
@@ -415,39 +415,97 @@ seed: 42
 
 After teacher generation finishes on the current split, Notebook 02 prints how many canonical rows fit each sequence length. Use those current numbers when choosing `--max-seq-length`.
 
+Important Mac/CUDA difference: CUDA Unsloth applies gradient accumulation in the usual way, so `batch_size=1` and `gradient_accumulation_steps=8` means one optimizer update per eight examples. The current upstream MLX-Tune native path accepts the config field but did not forward it into MLX-LM in this environment. We patch the installed MLX-Tune package locally so `TrainingArgs` receives `grad_accumulation_steps=self.gradient_accumulation_steps`. `train_unsloth.py` checks that patch before Mac training.
+
+One-time local patch for the current MLX-Tune version:
+
+```bash
+uv run python - <<'PY'
+from pathlib import Path
+import mlx_tune.sft_trainer as sft_trainer
+
+path = Path(sft_trainer.__file__)
+text = path.read_text()
+old = "            adapter_file=adapter_file,\\n            grad_checkpoint=self._should_use_grad_checkpoint(),\\n        )\\n"
+new = "            adapter_file=adapter_file,\\n            grad_checkpoint=self._should_use_grad_checkpoint(),\\n            grad_accumulation_steps=self.gradient_accumulation_steps,\\n        )\\n"
+if new in text:
+    print("MLX-Tune gradient accumulation patch already applied:", path)
+elif old in text:
+    path.write_text(text.replace(old, new, 1))
+    print("Patched MLX-Tune gradient accumulation:", path)
+else:
+    raise SystemExit(f"Could not find expected TrainingArgs block in {path}")
+PY
+```
+
+Current patched Mac dry-run coverage from the canonical file on this machine. For MLX-LM, training iterations are microsteps; gradient accumulation changes optimizer-update frequency but does not reduce how many examples must run through forward/backward for one pass.
+
+```text
+2048 tokens: 471/721 rows fit
+2560 tokens: 615/721 rows fit
+3072 tokens: 721/721 rows fit
+```
+
+On this Mac, full `3072` context still hits the Metal allocation limit during backward. The practical local training run uses `2560` context and `gradient_accumulation_steps=1`. CUDA Unsloth can use the larger effective batch through `--grad-accum 8`.
+
 ## 6. Train The Student
 
-### Recommended NVIDIA Path: Unsloth
+### Mac Path: MLX-Tune
 
-Install Unsloth on the CUDA/Linux server, then run:
+On Apple Silicon, `train_unsloth.py` imports `mlx_tune` and keeps the training code shaped like Unsloth:
+
+```bash
+uv pip install mlx-tune
+
+uv run python 1-distilling-a-0-8b-tool-calling-agent/train_unsloth.py \
+  --train-path outputs/gpt_5_5_medium_sql_agent_train_sft_canonical_3072.jsonl \
+  --output-dir outputs/qwen3_5_0_8b_mlx_tune_sql_agent_gpt_teacher_sft_2560_gradaccum1 \
+  --max-seq-length 2560 \
+  --grad-accum 1 \
+  --learning-rate 1e-4
+```
+
+The script uses response-only training, so the loss is on the assistant JSON decision rather than on the whole prompt.
+
+The same file can still run on CUDA later by forcing the CUDA backend:
 
 ```bash
 uv pip install unsloth
 
 uv run python 1-distilling-a-0-8b-tool-calling-agent/train_unsloth.py \
+  --backend cuda \
   --model unsloth/Qwen3.5-0.8B \
   --train-path outputs/gpt_5_5_medium_sql_agent_train_sft_canonical_3072.jsonl \
-  --output-dir outputs/qwen3_5_0_8b_unsloth_sql_agent_gpt_teacher_sft_3072
-```
-
-This is the recommended path for a rented RTX 4080 16GB. It uses bf16 LoRA by default. `--load-in-4bit` exists as a fallback if bf16 LoRA does not fit, but it is not the first choice for Qwen3.5.
-
-### Apple Path: MLX-LM
-
-Direct MLX inference uses `enable_thinking=false`. MLX-LM LoRA does not currently expose the same chat-template option in its trainer, so use this path for Apple-side experiments and prefer Unsloth when you need exact no-thinking SFT parity.
-
-```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/train_mlx.py \
-  --model mlx-community/Qwen3.5-0.8B-MLX-bf16 \
-  --train-path outputs/gpt_5_5_medium_sql_agent_train_sft_canonical_3072.jsonl \
-  --output-dir outputs/qwen3_5_0_8b_mlx_sql_agent_gpt_teacher_sft_3072
+  --output-dir outputs/qwen3_5_0_8b_unsloth_sql_agent_gpt_teacher_sft_3072 \
+  --learning-rate 1e-4
 ```
 
 ## 7. Evaluate The Tuned Student
 
 The evaluation harness should still go through BAML. Serve the tuned model through an OpenAI-compatible endpoint, then run the same eval script with `--model` and `--base-url`.
 
-For an Unsloth adapter on the GPU server, one option is vLLM with LoRA enabled:
+On this Mac, serve the MLX-Tune adapter with `mlx_lm.server`:
+
+```bash
+uv run mlx_lm.server \
+  --model mlx-community/Qwen3.5-0.8B-MLX-bf16 \
+  --adapter-path outputs/qwen3_5_0_8b_mlx_tune_sql_agent_gpt_teacher_sft_2560_gradaccum1/adapter \
+  --host 127.0.0.1 \
+  --port 8095 \
+  --chat-template-args '{"enable_thinking": false}'
+```
+
+```bash
+uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
+  --model mlx-community/Qwen3.5-0.8B-MLX-bf16 \
+  --base-url http://127.0.0.1:8095/v1 \
+  --data-dir data/sql_agent_bird_critic \
+  --max-turns 8 \
+  --max-new-tokens 1024 \
+  --output outputs/qwen3_5_0_8b_mlx_tune_sql_agent_gpt_teacher_sft_2560_gradaccum1_eval.json
+```
+
+On NVIDIA later, serve a CUDA Unsloth adapter with vLLM LoRA:
 
 ```bash
 python -m vllm.entrypoints.openai.api_server \
@@ -466,27 +524,6 @@ uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
   --max-turns 8 \
   --max-new-tokens 1024 \
   --output outputs/qwen3_5_0_8b_unsloth_sql_agent_gpt_teacher_sft_3072_eval.json
-```
-
-For an MLX adapter on the Mac:
-
-```bash
-uv run mlx_lm.server \
-  --model mlx-community/Qwen3.5-0.8B-MLX-bf16 \
-  --adapter-path outputs/qwen3_5_0_8b_mlx_sql_agent_gpt_teacher_sft_3072/adapter \
-  --host 127.0.0.1 \
-  --port 8095 \
-  --chat-template-args '{"enable_thinking": false}'
-```
-
-```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
-  --model mlx-community/Qwen3.5-0.8B-MLX-bf16 \
-  --base-url http://127.0.0.1:8095/v1 \
-  --data-dir data/sql_agent_bird_critic \
-  --max-turns 8 \
-  --max-new-tokens 1024 \
-  --output outputs/qwen3_5_0_8b_mlx_sql_agent_gpt_teacher_sft_3072_eval.json
 ```
 
 Measured result:
