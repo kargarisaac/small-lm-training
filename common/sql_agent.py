@@ -6,9 +6,11 @@ import io
 import json
 import re
 import shutil
+import signal
 import sqlite3
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
@@ -21,6 +23,7 @@ from . import config as cfg
 
 
 DATASET = cfg.SQL_AGENT_DATASET
+SQL_QUERY_TIMEOUT_SECONDS = 30.0
 SYSTEM_PROMPT = """You are a SQL tool-use agent.
 You repair or write SQLite for a user issue by interacting with a deterministic database environment.
 
@@ -241,6 +244,29 @@ def run_task(
             conn.close()
 
 
+def run_task_with_timeout(
+    row: dict[str, Any],
+    *,
+    data_dir: Path,
+    generate: Generate,
+    max_turns: int = 8,
+    timeout_seconds: float = 0.0,
+) -> dict[str, Any]:
+    if timeout_seconds <= 0:
+        return run_task(row, data_dir=data_dir, generate=generate, max_turns=max_turns)
+
+    def raise_timeout(_signum: int, _frame: Any) -> None:
+        raise TimeoutError(f"task exceeded {timeout_seconds:g}s")
+
+    previous_handler = signal.signal(signal.SIGALRM, raise_timeout)
+    signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
+    try:
+        return run_task(row, data_dir=data_dir, generate=generate, max_turns=max_turns)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
 def task_result(row: dict[str, Any], trace: list[dict[str, Any]], stop_reason: str, success: bool) -> dict[str, Any]:
     return {
         "id": row["id"],
@@ -300,22 +326,40 @@ def run_sql_observation(conn: sqlite3.Connection, sql: str) -> dict[str, Any]:
         return {"ok": False, "error": str(error)}
 
 
-def execute_one_sql(conn: sqlite3.Connection, sql: str) -> list[Any] | None:
-    cur = conn.execute(sql)
-    if sql.lstrip().lower().startswith(("select", "with", "pragma")):
-        return cur.fetchall()
-    conn.commit()
+def execute_one_sql(conn: sqlite3.Connection, sql: str, query_timeout: float = SQL_QUERY_TIMEOUT_SECONDS) -> list[Any] | None:
+    deadline = time.monotonic() + query_timeout
+    timed_out = False
+
+    def stop_expired_query() -> int:
+        nonlocal timed_out
+        if time.monotonic() >= deadline:
+            timed_out = True
+            return 1
+        return 0
+
+    conn.set_progress_handler(stop_expired_query, 10_000)
     try:
-        return cur.fetchall()
-    except sqlite3.Error:
-        return None
+        cur = conn.execute(sql)
+        if sql.lstrip().lower().startswith(("select", "with", "pragma")):
+            return cur.fetchall()
+        conn.commit()
+        try:
+            return cur.fetchall()
+        except sqlite3.Error:
+            return None
+    except sqlite3.OperationalError as error:
+        if timed_out:
+            raise TimeoutError(f"SQLite query exceeded {query_timeout:g}s") from error
+        raise
+    finally:
+        conn.set_progress_handler(None, 0)
 
 
-def execute_sql_list(conn: sqlite3.Connection, sqls: list[str]) -> tuple[list[Any] | None, bool, str]:
+def execute_sql_list(conn: sqlite3.Connection, sqls: list[str], query_timeout: float = SQL_QUERY_TIMEOUT_SECONDS) -> tuple[list[Any] | None, bool, str]:
     last = None
     for sql in sqls:
         try:
-            last = execute_one_sql(conn, sql)
+            last = execute_one_sql(conn, sql, query_timeout)
         except Exception as error:
             conn.rollback()
             return last, True, str(error)
@@ -357,7 +401,7 @@ def run_test_case(
         "date": date,
         "datetime": datetime,
         "execute_queries": lambda sqls, path, connection=None, logger=None, section_title="", return_error=False: test_execute_queries(sqls, path, connection or conn, return_error),
-        "perform_query_on_sqlite_databases": lambda query, path, conn=None, query_timeout=30: (execute_one_sql(conn or sqlite3.connect(path), query), conn),
+        "perform_query_on_sqlite_databases": lambda query, path, conn=None, query_timeout=30: (execute_one_sql(conn or sqlite3.connect(path), query, query_timeout), conn),
         "ex_base": ex_base,
         "check_sql_function_usage": check_sql_function_usage,
         "remove_distinct": remove_distinct,

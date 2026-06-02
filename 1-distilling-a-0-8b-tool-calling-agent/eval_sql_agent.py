@@ -66,6 +66,7 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--max-new-tokens", type=int, default=1024)
     parser.add_argument("--max-turns", type=int, default=8)
+    parser.add_argument("--task-timeout-seconds", type=float, default=0.0)
     parser.add_argument("--server-wait-seconds", type=int, default=180)
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
@@ -104,7 +105,13 @@ def main() -> None:
             print(f"{index}/{len(rows)} {row['id']} cached", flush=True)
             continue
         try:
-            result = sql_agent.run_task(row, data_dir=args.data_dir, generate=generate, max_turns=args.max_turns)
+            result = sql_agent.run_task_with_timeout(
+                row,
+                data_dir=args.data_dir,
+                generate=generate,
+                max_turns=args.max_turns,
+                timeout_seconds=args.task_timeout_seconds,
+            )
         except Exception as error:
             result = {
                 "id": row["id"],

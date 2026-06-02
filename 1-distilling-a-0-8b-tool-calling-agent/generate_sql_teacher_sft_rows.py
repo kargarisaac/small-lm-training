@@ -76,6 +76,7 @@ def main() -> None:
     parser.add_argument("--max-turns", type=int, default=8)
     parser.add_argument("--task-timeout-seconds", type=int, default=600)
     parser.add_argument("--no-task-isolation", action="store_true")
+    parser.add_argument("--retry-runtime-errors", action="store_true")
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
 
@@ -90,6 +91,10 @@ def main() -> None:
         results = cached.get("results", [])
         if output_path.exists():
             sft_trace_rows = cfg.read_jsonl(output_path)
+        if args.retry_runtime_errors:
+            retry_ids = {row["id"] for row in results if row.get("stop_reason") == "teacher_runtime_error"}
+            results = [row for row in results if row["id"] not in retry_ids]
+            print(f"Retrying {len(retry_ids)} cached teacher_runtime_error tasks.", flush=True)
         print(f"Loaded {len(results)} cached teacher results from: {report_path}", flush=True)
     done = {row["id"] for row in results}
     generate = None

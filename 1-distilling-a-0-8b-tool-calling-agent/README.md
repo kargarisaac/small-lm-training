@@ -191,6 +191,103 @@ sudo systemctl restart nvidia-power-limit.service
 
 The 150W cap is a stability guard, not a VRAM limiter. It reduces maximum electrical/thermal load; it does not reduce the model's GPU memory allocation. For memory pressure, use smaller models, lower context length, lower batch/concurrency, quantization, or more VRAM/system RAM.
 
+## Fresh CUDA Server Setup
+
+For a new rented NVIDIA machine, use one repo-local environment:
+
+```text
+/workspace/small-lm-training/.venv
+```
+
+The setup script expects Python 3.11 and installs the validated CUDA stack there: Torch `2.8.0+cu128`, FlashAttention `2.8.3`, flash-linear-attention, causal-conv1d, Unsloth `2026.5.10`, TRL, and PEFT. Do not create extra throwaway envs for training.
+
+Clone the repo on the server:
+
+```bash
+cd /workspace
+git clone https://github.com/kargarisaac/small-lm-training.git
+cd small-lm-training
+```
+
+Copy the existing SFT data from your Mac. This is not regenerated on the server because it came from previous teacher runs:
+
+```bash
+scp -P <PORT> -i ~/.ssh/id_ed25519 \
+  outputs/gpt_5_5_medium_sql_agent_train_frozen_current.jsonl \
+  root@<HOST>:/workspace/small-lm-training/outputs/
+```
+
+Then run:
+
+```bash
+1-distilling-a-0-8b-tool-calling-agent/setup_cuda_server.sh
+```
+
+The script:
+
+- creates or reuses `.venv`
+- installs the pinned CUDA student-training dependencies
+- verifies CUDA, Unsloth, FlashAttention, flash-linear-attention, causal-conv1d, and xformers imports
+- downloads SQLite templates directly from `birdsql/six-gym-sqlite`
+- checks that the local SFT JSONL exists
+- runs a dry-run tokenization/config verification
+
+To also run a tiny actual training verification:
+
+```bash
+VERIFY_TRAIN_STEPS=2 1-distilling-a-0-8b-tool-calling-agent/setup_cuda_server.sh
+```
+
+Useful knobs:
+
+```bash
+SKIP_INSTALL=1        # reuse the existing venv packages
+SKIP_DB_DOWNLOAD=1   # skip SQLite template download
+SFT_DATA_URL=...     # download the SFT JSONL from an artifact URL instead of scp
+```
+
+Run the real student training explicitly:
+
+```bash
+python 1-distilling-a-0-8b-tool-calling-agent/train_unsloth.py \
+  --backend cuda \
+  --model unsloth/Qwen3.5-0.8B \
+  --train-path outputs/gpt_5_5_medium_sql_agent_train_frozen_current.jsonl \
+  --output-dir outputs/qwen3_5_0_8b_sql_agent_sft_cuda_gpt55_653rows_3072_2epoch_lr5e-5_r16 \
+  --max-seq-length 3072 \
+  --batch-size 1 \
+  --grad-accum 8 \
+  --learning-rate 5e-5 \
+  --lora-rank 16 \
+  --lora-alpha 16 \
+  --max-steps 146
+```
+
+Teacher generation is intentionally not part of this server setup. The normal flow is to generate/curate teacher traces elsewhere, copy the SFT JSONL to the GPU server, and train only the student on the rented GPU.
+
+Validated RTX 3090 frozen-run config:
+
+```text
+teacher data: outputs/gpt_5_5_medium_sql_agent_train_frozen_current.jsonl
+source rows: 653
+kept rows at 3072 tokens: 611
+train rows: 581
+validation rows: 30
+max sequence length: 3072
+optimizer steps: 146
+batch size: 1
+gradient accumulation: 8
+learning rate: 5e-5
+LoRA rank/alpha: 16/16
+```
+
+Completed adapter runs from this config:
+
+| Model | Runtime | Final validation loss | Local artifact |
+| --- | ---: | ---: | --- |
+| `unsloth/Qwen3.5-0.8B` | 453s | 0.4125 | `outputs/remote_training_artifacts/qwen3_5_0_8b_sql_agent_sft_cuda_gpt55_653rows_3072_2epoch_lr5e-5_r16/` |
+| `unsloth/Qwen3.5-2B` | 524s | 0.3518 | `outputs/remote_training_artifacts/qwen3_5_2b_sql_agent_sft_cuda_gpt55_653rows_3072_2epoch_lr5e-5_r16/` |
+
 ## 1. Explore And Prepare Data
 
 Run:
@@ -254,7 +351,7 @@ uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
 Measured result:
 
 ```text
-No current BAML-harness result is checked in yet.
+See the final Result Summary for the current CUDA local baseline.
 ```
 
 Rerun after Notebook 01 writes the percentage split.
@@ -290,7 +387,7 @@ This uses BAML structured output: `draft` plus `output`.
 Measured result:
 
 ```text
-No current BAML-harness result is checked in yet.
+See the final Result Summary for the current 220-task eval.
 ```
 
 ### Qwen3.5 35B A3B 8-bit
@@ -322,7 +419,7 @@ This uses BAML structured output: `draft` plus `output`.
 Measured result:
 
 ```text
-No current BAML-harness result is checked in yet.
+No current 220-task result from this harness run yet.
 ```
 
 ### LFM2.5 8B A1B
@@ -351,7 +448,7 @@ uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
 Measured result:
 
 ```text
-No current BAML-harness result is checked in yet.
+No current 220-task result from this harness run yet.
 ```
 
 ## 4. Generate BAML-Canonical Teacher Trace Rows
@@ -394,9 +491,12 @@ Run:
 Notebook 02 converts successful BAML-canonical trace rows into the final training file:
 
 ```text
-outputs/gpt_5_5_medium_sql_agent_train_sft_canonical_3072.jsonl
-outputs/gpt_5_5_medium_sql_agent_train_sft_canonical_3072.report.json
+outputs/gpt_5_5_medium_sql_agent_train_frozen_20260602_153955_653rows.jsonl
+outputs/gpt_5_5_medium_sql_agent_train_frozen_20260602_153955_653rows.report.json
+outputs/gpt_5_5_medium_sql_agent_train_frozen_current.jsonl
 ```
+
+The timestamped file is the immutable provenance file. The `frozen_current` file is the copy used by setup scripts and server transfers.
 
 This matters because the harness consumes exactly one JSON action per assistant turn. The final SFT data trains on the canonical `teacher_action`, not on a BAML-canonical teacher blob that might contain extra actions.
 
@@ -438,15 +538,20 @@ else:
 PY
 ```
 
-Current patched Mac dry-run coverage from the canonical file on this machine. For MLX-LM, training iterations are microsteps; gradient accumulation changes optimizer-update frequency but does not reduce how many examples must run through forward/backward for one pass.
+Current frozen teacher data used for the CUDA runs:
 
 ```text
-2048 tokens: 471/721 rows fit
-2560 tokens: 615/721 rows fit
-3072 tokens: 721/721 rows fit
+source rows: 653
+3072 tokens: 611/653 rows fit
+4096 tokens: 650/653 rows fit
+3072-token train/validation split: 581/30
+p50 tokens: 1777
+p90 tokens: 2921
+p95 tokens: 3177
+max tokens: 4315
 ```
 
-On this Mac, full `3072` context still hits the Metal allocation limit during backward. The practical local training run uses `2560` context and `gradient_accumulation_steps=1`. CUDA Unsloth can use the larger effective batch through `--grad-accum 8`.
+For MLX-LM, training iterations are microsteps; gradient accumulation changes optimizer-update frequency but does not reduce how many examples must run through forward/backward for one pass. On this Mac, full `3072` context can still hit the Metal allocation limit during backward. CUDA Unsloth can use the larger effective batch through `--grad-accum 8`.
 
 ## 6. Train The Student
 
@@ -458,11 +563,11 @@ On Apple Silicon, `train_unsloth.py` imports `mlx_tune` and keeps the training c
 uv pip install mlx-tune
 
 uv run python 1-distilling-a-0-8b-tool-calling-agent/train_unsloth.py \
-  --train-path outputs/gpt_5_5_medium_sql_agent_train_sft_canonical_3072.jsonl \
+  --train-path outputs/gpt_5_5_medium_sql_agent_train_frozen_current.jsonl \
   --output-dir outputs/qwen3_5_0_8b_mlx_tune_sql_agent_gpt_teacher_sft_2560_gradaccum1 \
   --max-seq-length 2560 \
   --grad-accum 1 \
-  --learning-rate 1e-4
+  --learning-rate 5e-5
 ```
 
 The script uses response-only training, so the loss is on the assistant JSON decision rather than on the whole prompt.
@@ -475,14 +580,25 @@ uv pip install unsloth
 uv run python 1-distilling-a-0-8b-tool-calling-agent/train_unsloth.py \
   --backend cuda \
   --model unsloth/Qwen3.5-0.8B \
-  --train-path outputs/gpt_5_5_medium_sql_agent_train_sft_canonical_3072.jsonl \
-  --output-dir outputs/qwen3_5_0_8b_unsloth_sql_agent_gpt_teacher_sft_3072 \
-  --learning-rate 1e-4
+  --train-path outputs/gpt_5_5_medium_sql_agent_train_frozen_current.jsonl \
+  --output-dir outputs/qwen3_5_0_8b_sql_agent_sft_cuda_gpt55_653rows_3072_2epoch_lr5e-5_r16 \
+  --max-seq-length 3072 \
+  --batch-size 1 \
+  --grad-accum 8 \
+  --learning-rate 5e-5 \
+  --lora-rank 16 \
+  --lora-alpha 16 \
+  --max-steps 146
 ```
 
 ## 7. Evaluate The Tuned Student
 
-The evaluation harness should still go through BAML. Serve the tuned model through an OpenAI-compatible endpoint, then run the same eval script with `--model` and `--base-url`.
+The evaluation harness must use the same prompt, parser, tools, and deterministic SQL scoring. There are two supported paths:
+
+- `eval_sql_agent.py`: OpenAI-compatible HTTP model server, used for GPT/MLX/vLLM-style serving.
+- `eval_sql_agent_local.py`: local HF/PEFT model in-process, used for CUDA base and adapter evals without starting a separate server.
+
+The completed CUDA evals used `eval_sql_agent_local.py`. It renders the same BAML prompt/messages, then runs the same SQL harness and parser locally.
 
 On this Mac, serve the MLX-Tune adapter with `mlx_lm.server`:
 
@@ -501,51 +617,69 @@ uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
   --base-url http://127.0.0.1:8095/v1 \
   --data-dir data/sql_agent_bird_critic \
   --max-turns 8 \
-  --max-new-tokens 1024 \
+  --max-new-tokens 512 \
+  --task-timeout-seconds 180 \
   --output outputs/qwen3_5_0_8b_mlx_tune_sql_agent_gpt_teacher_sft_2560_gradaccum1_eval.json
 ```
 
-On NVIDIA later, serve a CUDA Unsloth adapter with vLLM LoRA:
+On NVIDIA, evaluate the saved HF/PEFT adapter directly:
+
+```bash
+python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent_local.py \
+  --model unsloth/Qwen3.5-0.8B \
+  --adapter-path outputs/qwen3_5_0_8b_sql_agent_sft_cuda_gpt55_653rows_3072_2epoch_lr5e-5_r16/adapter \
+  --data-dir data/sql_agent_bird_critic \
+  --partition eval \
+  --max-seq-length 8192 \
+  --max-new-tokens 512 \
+  --max-turns 8 \
+  --task-timeout-seconds 180 \
+  --temperature 0.0 \
+  --dtype bf16 \
+  --output outputs/qwen3_5_0_8b_sql_agent_sft_cuda_gpt55_653rows_3072_2epoch_eval.json
+```
+
+Use the same command without `--adapter-path` for the non-finetuned baseline.
+
+vLLM serving is still the right path when we need OpenAI-compatible serving, LoRA hot-loading, batching, or logprobs for a later soft-label post:
 
 ```bash
 python -m vllm.entrypoints.openai.api_server \
   --model unsloth/Qwen3.5-0.8B \
   --enable-lora \
-  --lora-modules sql_agent=outputs/qwen3_5_0_8b_unsloth_sql_agent_gpt_teacher_sft_3072/adapter \
+  --lora-modules sql_agent=outputs/qwen3_5_0_8b_sql_agent_sft_cuda_gpt55_653rows_3072_2epoch_lr5e-5_r16/adapter \
   --served-model-name qwen3_5_0_8b_sql_agent \
   --port 8094
 ```
 
-```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
-  --model qwen3_5_0_8b_sql_agent \
-  --base-url http://127.0.0.1:8094/v1 \
-  --data-dir data/sql_agent_bird_critic \
-  --max-turns 8 \
-  --max-new-tokens 1024 \
-  --output outputs/qwen3_5_0_8b_unsloth_sql_agent_gpt_teacher_sft_3072_eval.json
-```
-
-Measured result:
-
-```text
-No current BAML-harness tuned-student result is checked in yet.
-```
-
-Fill this in only after rerunning the tuned model through the same BAML structured-output harness.
-
 ## Result Summary
 
-| Run | Success | Notes |
-| --- | ---: | --- |
-| Qwen3.5-0.8B base student | rerun | BAML harness |
-| LFM2.5-8B-A1B baseline | rerun | BAML harness |
-| Qwen3.5-35B-A3B teacher | rerun | BAML harness |
-| GPT 5.5 medium teacher | rerun | BAML harness |
-| Qwen3.5-0.8B tuned student | rerun | BAML harness |
+Current frozen-run eval split: `220` tasks from `data/sql_agent_bird_critic/eval.jsonl`.
+
+| Run | Success | Submitted | Parse failures | Repeated-action failures | Notes |
+| --- | ---: | ---: | ---: | ---: | --- |
+| GPT 5.5 medium teacher | 115/220 = 52.3% | 220 | 0 | 0 | OpenAI-compatible ChatGPT shim, reasoning effort `medium` |
+| Qwen3.5-0.8B base | 1/220 = 0.5% | 1 | 11 | 208 | `unsloth/Qwen3.5-0.8B`, no adapter |
+| Qwen3.5-0.8B SFT | 44/220 = 20.0% | 204 | 12 | 4 | 653-row GPT teacher data, 3072-token filter |
+| Qwen3.5-2B base | 0/220 = 0.0% | 1 | 0 | 219 | `unsloth/Qwen3.5-2B`, no adapter |
+| Qwen3.5-2B SFT | 55/220 = 25.0% | 189 | 9 | 22 | Same data/config as 0.8B |
+
+The main measured effect is harness control: base Qwen students mostly repeat actions and almost never submit. SFT teaches them to interact with the harness and submit, but SQL correctness still trails the GPT teacher by a wide margin.
+
+Ignored local artifacts:
+
+```text
+outputs/gpt_5_5_medium_sql_agent_eval_220_timeout180.json
+outputs/remote_eval_results/qwen3_5_0_8b_base_eval_full_ctx8192_maxnew512_timeout180.json
+outputs/remote_eval_results/qwen3_5_0_8b_sql_agent_sft_cuda_gpt55_653rows_3072_2epoch_eval_full_ctx8192_maxnew512_timeout180_pyfix.json
+outputs/remote_eval_results/qwen3_5_2b_base_eval_full_ctx8192_maxnew512_timeout180.json
+outputs/remote_eval_results/qwen3_5_2b_sql_agent_sft_cuda_gpt55_653rows_3072_2epoch_eval_full_ctx8192_maxnew512_timeout180.json
+outputs/remote_training_artifacts/qwen3_5_0_8b_sql_agent_sft_cuda_gpt55_653rows_3072_2epoch_lr5e-5_r16/
+outputs/remote_training_artifacts/qwen3_5_2b_sql_agent_sft_cuda_gpt55_653rows_3072_2epoch_lr5e-5_r16/
+```
 
 ## Next Fixes
 
-- Run the current canonical 3072-token SFT file through the recommended Unsloth recipe.
-- Add a format-only warmup dataset so the student reliably emits JSON actions before learning SQL.
-- Consider training more LoRA layers or a stronger small student.
+- Improve teacher trace quality and coverage before increasing model size again.
+- Compare `4096` context training because it keeps 650/653 rows instead of 611/653.
+- Try stronger student candidates only after the data/prompt failure analysis shows the remaining errors are model capacity, not bad supervision.

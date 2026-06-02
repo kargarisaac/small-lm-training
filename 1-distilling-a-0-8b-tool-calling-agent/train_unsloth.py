@@ -37,6 +37,7 @@ def main() -> None:
     parser.add_argument("--learning-rate", type=float, default=cfg.SFT_LEARNING_RATE)
     parser.add_argument("--lora-rank", type=int, default=cfg.SFT_LORA_RANK)
     parser.add_argument("--lora-alpha", type=int, default=cfg.SFT_LORA_ALPHA)
+    parser.add_argument("--target-modules", nargs="+", default=None)
     parser.add_argument("--mlx-num-layers", type=int, default=cfg.SFT_MLX_NUM_LAYERS)
     parser.add_argument("--validation-fraction", type=float, default=cfg.SFT_VALIDATION_FRACTION)
     parser.add_argument("--seed", type=int, default=cfg.SFT_SEED)
@@ -46,9 +47,6 @@ def main() -> None:
     parser.add_argument("--no-grad-checkpoint", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
-
-    from datasets import Dataset
-    from transformers import AutoTokenizer, DataCollatorForSeq2Seq
 
     if args.backend == "auto":
         if platform.system() == "Darwin" and platform.machine() == "arm64":
@@ -74,7 +72,7 @@ def main() -> None:
         except Exception:
             mlx_grad_accumulation_is_forwarded = False
 
-    if not args.dry_run and args.backend == "cuda":
+    if args.backend == "cuda" and not args.dry_run:
         try:
             from unsloth import FastLanguageModel, is_bfloat16_supported
         except ImportError as error:
@@ -91,9 +89,16 @@ def main() -> None:
         except ImportError as error:
             raise RuntimeError("Install MLX-Tune on this Mac first. Example: uv pip install mlx-tune") from error
 
+    from datasets import Dataset
+    from transformers import AutoConfig, AutoTokenizer, DataCollatorForSeq2Seq
+
     if args.train_path is None:
         raise ValueError("--train-path is required. Run notebook 02 to write the final filtered SFT file first.")
     rows = cfg.read_jsonl(args.train_path, args.limit)
+    model_config = AutoConfig.from_pretrained(args.model, trust_remote_code=True)
+    target_modules = args.target_modules
+    if target_modules is None:
+        target_modules = cfg.SFT_LFM2_MOE_TARGET_MODULES if model_config.model_type == "lfm2_moe" else cfg.SFT_TARGET_MODULES
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -126,6 +131,7 @@ def main() -> None:
     print("Training iterations per epoch:", steps_per_epoch)
     print("Estimated optimizer updates per epoch:", optimizer_steps_per_epoch)
     print("Gradient accumulation used:", actual_grad_accum)
+    print("LoRA target modules:", target_modules)
     if args.backend == "mlx":
         print("MLX-Tune forwards gradient accumulation:", mlx_grad_accumulation_is_forwarded)
         print("MLX subprocess training:", args.mlx_subprocess)
@@ -155,7 +161,7 @@ def main() -> None:
             r=args.lora_rank,
             lora_alpha=args.lora_alpha,
             lora_dropout=0,
-            target_modules=cfg.SFT_TARGET_MODULES,
+            target_modules=target_modules,
             bias="none",
             use_gradient_checkpointing=False if args.no_grad_checkpoint else "unsloth",
             random_state=args.seed,
@@ -242,6 +248,7 @@ def main() -> None:
             "training_iterations_per_epoch": steps_per_epoch,
             "estimated_optimizer_updates_per_epoch": optimizer_steps_per_epoch,
             "actual_grad_accum": actual_grad_accum,
+            "target_modules": target_modules,
             "adapter_dir": adapter_dir,
             "stats": prepared["stats"],
         },
