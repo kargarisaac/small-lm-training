@@ -24,3 +24,5 @@ data/sql_agent_bird_critic/dbs/
 !.env.template
 outputs/
 unsloth_compiled_cache/
+
+.local/
