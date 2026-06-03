@@ -1,120 +1,84 @@
 # Distilling A 0.8B SQL Tool-Use Agent
 
-This post is about a very practical question:
+I started this experiment with a very specific question:
 
-> Can we take a tiny model, put it inside a real tool-use harness, and teach it to behave more like a stronger model on one focused task?
+> Can a tiny model learn to act like a stronger model inside a real tool-use loop?
 
-That is the version of distillation I care about here. Not just "make the small language model imitate text from the big language model", but "make the small model imitate useful behavior inside the same environment where it will actually run."
+Not "can it write SQL-looking text?" Not "can it pass a prompt demo?" I wanted the small model to sit inside the same harness as the teacher, inspect a database, run SQL, read observations, and submit a final answer that passes deterministic hidden tests.
 
-For this first post, the environment is SQLite. The model gets a user issue and a buggy SQL query. It can inspect the schema, run SQL, observe results or errors, and finally submit corrected SQL. The score is deterministic: hidden tests run against the database. No LLM user simulator. No LLM judge.
+That difference matters. Distilling a normal chat answer is one thing. Distilling an agent is messier, because the thing we want to transfer is not only a final string. It is a sequence of decisions.
 
-![SQL tool-use harness](assets/sql-tool-use-harness-sketchnote.png)
+This post is the first version of that story. I kept the benchmark fixed, kept the environment fixed, and changed only the model/training side. The runnable commands live in the README. Here I want to explain the theory, the architecture, the harness, and what actually happened in the experiments.
 
-## The Plan
+![Experiment story](assets/experiment-story-sketchnote.png)
 
-We will build the post around one loop:
+## Distillation, Plainly
 
-1. Prepare a focused SQL-agent benchmark.
-2. Run a small baseline student.
-3. Run stronger teacher baselines.
-4. Keep only successful teacher trajectories.
-5. Convert each successful trajectory into supervised fine-tuning rows.
-6. Train the 0.8B student with hard-token SFT.
-7. Re-run the same eval, then compare nearby student variants under the same harness.
+Knowledge distillation is the idea that a stronger teacher model can transfer some useful behavior into a smaller student model.
 
-The important constraint is fairness: the baseline student, teachers, trajectory collection, training data, and tuned-student eval all use the same structured harness contract.
+The classic version is simple: train the student to match the teacher. But there are several different things the student can match:
 
-## Experiment Cost
+| Distillation signal | What the student sees | Typical use |
+| --- | --- | --- |
+| Hard labels | The teacher's chosen answer tokens | Supervised fine-tuning, instruction tuning |
+| Soft labels / logits | The teacher's probability distribution over tokens | More information about alternatives and uncertainty |
+| Hidden states | Internal activations from a teacher network | Usually closer architecture families or special training setups |
+| Trajectories | Multi-step behavior: actions, observations, final answer | Agents and tool-use systems |
+| Rewards | A score for the result, sometimes with rollouts | RL-style training after or instead of SFT |
 
-I also want the cost accounting to stay visible. The GPT teacher run used my ChatGPT subscription through a local OpenAI-compatible shim, not direct pay-per-token API billing. The student training ran on a rented RunPod GPU server, and the total rented-GPU training cost for this round was about 20 euros.
+This blog uses **offline hard-token trajectory distillation**.
 
-## What Distillation Means Here
+"Offline" means I first ran the teacher and saved the traces. The student never asks the teacher for help during training. "Hard-token" means the target is the teacher's actual next action, not the teacher's full probability distribution. "Trajectory" means a successful task can produce multiple training examples: one for inspecting the schema, one for running SQL, one for submitting the final answer, and so on.
 
-In ordinary supervised fine-tuning, we train on input/output examples:
+![Distillation signals](assets/distillation-signals-sketchnote.png)
 
-```text
-prompt -> desired answer
-```
-
-For an agentic harness, the examples are not just final answers. They are next actions:
+For an ordinary chat task, a training row might look like:
 
 ```text
-conversation so far -> next tool action
+prompt -> answer
 ```
 
-If the teacher solves a task in three actions, we can produce three training rows:
+For this agent task, a training row looks more like:
 
 ```text
-user issue -> teacher action 1
-user issue + action 1 + observation -> teacher action 2
-full history before submit -> teacher action 3
+conversation so far -> next structured action
 ```
 
-This is offline hard-token distillation. "Offline" because we generate teacher trajectories first and train later. "Hard-token" because the target is the teacher's actual next tokens, not the full probability distribution over possible tokens. Later posts can use logits/probabilities, on-policy corrections, and RL-style rewards.
+If the teacher solves one SQL task in three turns, that single task can become three SFT rows:
 
-![Teacher trajectory to SFT rows](assets/teacher-trajectory-to-sft-sketchnote.png)
+```text
+user issue -> inspect schema
+user issue + schema observation -> run SQL
+user issue + schema + SQL result -> submit final SQL
+```
 
-## The Benchmark
+That is the core of the experiment.
 
-For the current version of Blog 1, we use [`birdsql/six-gym-sqlite`](https://huggingface.co/datasets/birdsql/six-gym-sqlite).
+## The Fixed World
 
-Each row contains:
+The benchmark is [`birdsql/six-gym-sqlite`](https://huggingface.co/datasets/birdsql/six-gym-sqlite). Each task contains a user issue, a buggy or incomplete SQL query, a SQLite database, optional setup SQL, hidden tests, and reference SQL.
 
-- a natural-language user issue
-- buggy or incomplete SQL
-- a SQLite database template
-- optional preprocessing SQL
-- hidden test cases
-- reference SQL
-
-The model does **not** see the hidden tests or reference SQL. Those are only for scoring.
+The model does not see the hidden tests or the reference SQL. It only sees the user issue and the tool observations it earns by acting in the environment.
 
 ![One SQL-agent task](assets/sql-agent-task-sketchnote.png)
 
-The prepared split is deterministic:
+For this post I narrowed the task distribution instead of trying to cover everything at once:
 
-```text
-data/sql_agent_bird_critic/train.jsonl  # written by Notebook 01
-data/sql_agent_bird_critic/eval.jsonl   # written by Notebook 01
-data/sql_agent_bird_critic/dbs/         # SQLite templates
-```
+| Setting | Value |
+| --- | --- |
+| Task category | `Query` |
+| Databases | `netflix`, `movie_3`, `books`, `chinook` |
+| Source rows scanned | 5000 |
+| Candidate rows after filtering | 1099 |
+| Train split | 879 tasks |
+| Eval split | 220 tasks |
+| Split seed | 42 |
 
-The split is created in the first notebook, not in a hidden preparation script:
-
-```text
-1-distilling-a-0-8b-tool-calling-agent/notebooks/01_explore_sql_agent_benchmark.ipynb
-```
-
-The split variables are visible in the notebook:
-
-```python
-SPLIT_SEED = 42
-EVAL_FRACTION = 0.2
-TASK_CATEGORY = "Query"
-DB_FILTER = ["netflix", "movie_3", "books", "chinook"]
-```
-
-The selected split is domain-focused: only `Query` tasks from the selected media/catalog-style databases. We split by percentage inside each database, so eval stays representative of the same domain mix.
-
-```text
-netflix
-movie_3
-books
-chinook
-```
-
-With the current notebook settings, that gives:
-
-```text
-candidate rows: 1099
-train rows: 879
-eval rows: 220
-eval fraction: 0.2 per selected database
-```
+This is intentionally a small world. That makes it easier to ask a clean question: within one fixed SQL repair environment, how much agent behavior can we transfer into a small model?
 
 ## The Harness
 
-The model has one action interface:
+The harness gives the model exactly three actions:
 
 ```json
 {"action": "inspect_schema"}
@@ -122,353 +86,210 @@ The model has one action interface:
 {"action": "submit_sql", "sql": ["SQL statement 1", "SQL statement 2"]}
 ```
 
-The harness runs one action at a time. If the model inspects the schema or runs SQL, the environment appends an observation and asks for the next action. If the model submits SQL, the harness runs the hidden tests and stops.
+The loop is deterministic. The model emits one structured JSON action. The harness executes it. If the action was `inspect_schema` or `run_sql_query`, the harness appends an environment observation and asks for the next action. If the action was `submit_sql`, the harness runs the hidden tests and stops.
 
-```mermaid
-flowchart TD
-    A["Prepared SQL task"] --> B["Build messages"]
-    B --> C["Model generates one JSON action"]
-    C --> D["BAML parses draft/output"]
-    D --> E{"output.action"}
-    E -->|inspect_schema| F["Read SQLite schema"]
-    E -->|run_sql_query| G["Execute SQL on temp DB"]
-    F --> H["Append environment observation"]
-    G --> H
-    H --> C
-    E -->|submit_sql| I["Run hidden deterministic tests"]
-    I --> J["Pass/fail score"]
-```
+![Fixed SQL harness](assets/sql-agent-fixed-harness-sketchnote.png)
 
-The core loop is small. The real version lives in `common/sql_agent.py`, but conceptually it is this:
+There is no LLM judge here. The score is not a preference model saying whether the answer looks good. The score is whether the submitted SQL passes the hidden tests against the SQLite database.
 
-```python
-def run_task(row, *, data_dir, generate, max_turns=8):
-    messages = initial_messages(row)
-
-    with task_database(row, data_dir) as db_path:
-        conn = sqlite3.connect(db_path)
-        execute_sql_list(conn, row["preprocess_sql"])
-
-        for turn in range(1, max_turns + 1):
-            baml_output = generate(messages)
-            draft, action = parse_decision(baml_output)
-
-            if action is None:
-                return task_result(row, trace, "parse_failure", False)
-
-            messages.append({"role": "assistant", "content": baml_output})
-
-            if action["action"] == "inspect_schema":
-                observation = schema_text(conn)
-                messages.append({"role": "user", "content": environment_message(observation)})
-                continue
-
-            if action["action"] == "run_sql_query":
-                observation = run_sql_observation(conn, action["sql"])
-                messages.append({"role": "user", "content": environment_message(json.dumps(observation))})
-                continue
-
-            score = evaluate_submitted_sql(row, action["sql"], data_dir)
-            return task_result(row, trace, "submitted", score["success"])
-
-        return task_result(row, trace, "max_turns", False)
-```
-
-The parser is structural: it expects BAML-style `draft` plus `output`, then validates the action name and argument types. It does not use user-word keyword matching.
-
-```python
-def parse_decision(text):
-    stripped = strip_model_text(text)
-    value = json.loads(stripped)
-    draft = value.get("draft")
-    output = value.get("output", value)
-    return draft, normalize_action(output)
-```
-
-## A Real Task
-
-Here is one held-out eval task from the current split:
+That gives the eval a useful shape:
 
 ```text
-Task id: TRAIN_2367
+user issue
+  -> model action
+  -> SQLite observation
+  -> model action
+  -> hidden tests
+  -> pass/fail
+```
+
+The structured-output layer matters because tool-use failures are often boring but fatal. A model can be smart enough to reason about the SQL and still fail the task if it prints prose, repeats the same action, or never submits. So the harness records not just success, but also how the run stopped: submitted, parse failure, repeated action, max turns, or runtime error.
+
+I did not change that harness for the comparisons below.
+
+## The Model Architecture
+
+The runtime architecture has two sides.
+
+The **teacher side** runs stronger models inside the same SQL harness. If a teacher solves a train task, I keep the trace. If it fails, I do not use that trace for SFT.
+
+The **student side** is a smaller chat model trained with LoRA on those successful teacher actions. The student is still just a decoder-only language model predicting next tokens, but the target text is the next executable JSON action, not a friendly natural-language answer.
+
+There are also two hardware paths:
+
+| Path | Role |
+| --- | --- |
+| Mac + MLX | Local serving and eval for models that fit |
+| Rented NVIDIA GPU | Student SFT runs with Unsloth-style training |
+
+The teacher/student setup I used in this round:
+
+| Role | Models |
+| --- | --- |
+| Strong teachers / teacher candidates | GPT 5.5 medium, Qwen3.5-35B-A3B 8-bit |
+| Main tiny student | Qwen3.5-0.8B |
+| Nearby student comparisons | Qwen3.5-2B, LFM2.5-8B-A1B |
+
+The point of the nearby comparisons was not to crown a universal best model. It was to see whether the result was specific to the 0.8B student, whether a 2B same-family student changed the picture, and whether a larger sparse/expert-style student automatically won inside this harness. It did not.
+
+## Turning Teacher Traces Into SFT Rows
+
+The teacher data step is where agent distillation becomes concrete.
+
+![Teacher trajectory to SFT rows](assets/teacher-trajectory-to-sft-sketchnote.png)
+
+The GPT teacher was run on the 879 train tasks. It solved 446 of them:
+
+```text
+teacher train success: 446/879 = 50.7%
+submitted: 879/879
+parse failures: 0
+repeated-action failures: 0
+```
+
+Only successful trajectories were trusted. Those 446 successful tasks became 1046 canonical SFT rows, because each successful task can contribute multiple next-action examples.
+
+The final frozen SFT data for the CUDA runs:
+
+| Data property | Value |
+| --- | ---: |
+| Source SFT rows | 1046 |
+| Rows fitting 4096 tokens | 1042 |
+| Train rows | 990 |
+| Validation rows | 52 |
+| Max sequence length | 4096 |
+| LoRA rank | 32 |
+| LoRA alpha | 32 |
+| Learning rate | 5e-5 |
+
+The target is canonical JSON. I do not train the student on whatever messy wrapper text the teacher happened to emit. The harness needs one action, so the training target is one action:
+
+```json
+{"action":"submit_sql","sql":["SELECT * FROM track WHERE track_id = (SELECT MAX(track_id) FROM track);"]}
+```
+
+That little detail is important. For agent distillation, the target is not "the teacher sounded right." The target is "the teacher chose an action that the harness can execute."
+
+## A Concrete Held-Out Task
+
+Here is the kind of task the model sees on eval:
+
+```text
 Database: chinook
-Category: Query
 
 User issue:
-I want to find the latest track_id and use that id to filter records in
-the track table.
+I want to find the latest track_id and use that id to filter records
+in the track table.
 
 Buggy SQL:
 WITH vars AS (SELECT COUNT(*) AS vars_id FROM track)
 SELECT * FROM track WHERE track_id = vars_id
-
-Reference SQL, hidden from model:
-WITH vars AS (SELECT MAX(track_id) AS vars_id FROM track)
-SELECT * FROM track WHERE track_id = (SELECT vars_id FROM vars)
 ```
 
-The base student starts in the right direction, but gets stuck repeating the same tool action:
+The bug is subtle but common: `COUNT(*)` is not the latest id. The intended shape is to use `MAX(track_id)`.
+
+The base 0.8B student usually did not even get to that level of SQL repair. It often inspected the schema, then inspected it again, then stopped as a repeated action. That is a harness-control failure.
+
+The tuned 0.8B student handled this example much better. It inspected the schema, ran a small query to check the latest id, and submitted SQL using `MAX(track_id)`. That is exactly the kind of behavior I wanted distillation to transfer.
+
+But a story about one task can fool you. The aggregate eval is what matters.
+
+## Results
+
+All rows below are from the same 220-task held-out eval split and the same fixed SQL harness.
+
+![Held-out success chart](assets/current-eval-success-chart.png)
+
+| Run | Success | Submitted | Parse Stops | Repeat Stops | Max/Runtime Stops |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Qwen3.5-0.8B base | 1/220 = 0.5% | 1 | 11 | 208 | 0 |
+| Qwen3.5-0.8B SFT, 1046 rows | 44/220 = 20.0% | 204 | 6 | 10 | 0 |
+| Qwen3.5-0.8B SFT, submit rows duplicated once | 38/220 = 17.3% | 199 | 9 | 11 | 1 |
+| Qwen3.5-2B base | 0/220 = 0.0% | 1 | 0 | 219 | 0 |
+| Qwen3.5-2B SFT, 1046 rows | 57/220 = 25.9% | 206 | 5 | 9 | 0 |
+| LFM2.5-8B-A1B SFT, 1046 rows | 47/220 = 21.4% | 186 | 7 | 27 | 0 |
+| Qwen3.5-35B-A3B 8-bit local teacher candidate | 96/220 = 43.6% | 202 | 0 | 9 | 9 |
+| GPT 5.5 medium teacher | 115/220 = 52.3% | 220 | 0 | 0 | 0 |
+
+The first visible result is that SFT really did teach harness behavior.
+
+The base Qwen students almost never submitted. The 0.8B base submitted once. The 2B base submitted once. After distillation, both submitted on most tasks: 204/220 for the 0.8B student and 206/220 for the 2B student.
+
+That is not a cosmetic change. A model that does not submit cannot pass hidden tests.
+
+![Harness behavior chart](assets/harness-behavior-chart.png)
+
+The second result is that harness control is not the same as SQL competence.
+
+The tuned students submitted often, but many submissions were wrong. Qwen3.5-2B was the strongest student in this round at 57/220. That is a big jump from the base model, but still far below the GPT teacher at 115/220 and below the local Qwen35 teacher candidate at 96/220.
+
+The third result is a useful negative result. After normal fine-tuning, I tried duplicating the final `submit_sql` rows once. The hope was simple: maybe the small model needed more weight on final-answer behavior.
+
+It got worse:
 
 ```text
-Turn 1 parsed action:
-{"action": "inspect_schema"}
-
-Environment:
-schema text, including table track(track_id, name, ...)
-
-Turn 2 parsed action:
-{"action": "inspect_schema"}
-
-Stop reason:
-repeated_action
+0.8B SFT:              44/220 = 20.0%
+0.8B SFT submit x2:    38/220 = 17.3%
 ```
 
-The GPT teacher solves it:
+It lost 17 tasks the normal 0.8B adapter solved, gained 11 new solved tasks, and increased SQL execution errors. So the issue was not simply "make it submit more." The student had already learned to submit. The harder part was choosing better SQL before submitting.
+
+## Reading The Qwen35 Result
+
+I also ran `mlx-community/Qwen3.5-35B-A3B-8bit` locally on the whole current eval split.
+
+It landed at 96/220, or 43.6%. That makes it much stronger than the tuned students, but still below the GPT 5.5 medium teacher in this harness.
+
+The behavior was also different. Qwen35 submitted 202 times, had zero parse failures, and still hit 7 max-turn stops, 9 repeated-action stops, and 2 runtime errors. In one long failure it generated a large self-debate about an ambiguous SQL prompt until the response hit the length limit. That is not a benchmark problem. It is part of the model behavior being measured by this fixed harness.
+
+The important comparison is:
 
 ```text
-Turn 1 parsed action:
-{"action":"inspect_schema"}
-
-Turn 2 parsed action:
-{"action":"submit_sql","sql":["WITH vars AS (SELECT MAX(track_id) AS vars_id FROM track) SELECT * FROM track WHERE track_id = (SELECT vars_id FROM vars);"]}
-
-Score:
-pass
+Qwen3.5-2B SFT:         57/220 = 25.9%
+Qwen3.5-35B-A3B 8-bit:  96/220 = 43.6%
+GPT 5.5 medium:        115/220 = 52.3%
 ```
 
-The first tuned student also solves this specific task:
+So the student has learned part of the teacher behavior, but not enough to look like a compressed teacher yet.
+
+## What I Think Happened
+
+This round mostly transferred **interaction format** and **basic tool-use rhythm**.
+
+The base models were stuck at the door. They could emit something parseable sometimes, but they repeated actions and almost never reached final evaluation. SFT moved them into the room: inspect, query, observe, submit.
+
+The remaining gap is SQL decision quality. The student has to infer the correct repair from the user issue, schema, observations, and sometimes misleading buggy SQL. The SFT rows teach the shape of teacher actions, but a small model can still choose the wrong join, the wrong aggregation, the wrong filter, or the wrong interpretation of the user request.
+
+That is why the result is both encouraging and humbling:
 
 ```text
-Turn 1 parsed action:
-{"action": "inspect_schema"}
-
-Turn 2 parsed action:
-{"action": "run_sql_query", "sql": "SELECT track_id, name FROM track ORDER BY track_id DESC LIMIT 1;"}
-
-Environment:
-{"ok": true, "rows": [[3503, "Koyaanisqatsi"]], "row_count": 1, "truncated": false}
-
-Turn 3 parsed action:
-{"action": "submit_sql", "sql": ["SELECT * FROM track WHERE track_id = (SELECT MAX(track_id) FROM track);"]}
-
-Score:
-pass
+base 0.8B -> tuned 0.8B: 0.5% to 20.0%
+base 2B   -> tuned 2B:   0.0% to 25.9%
+teacher ceiling here:    52.3% for GPT 5.5 medium
 ```
 
-This is what we want distillation to do: make the small model produce useful next actions in the harness. But one nice example is not enough. The aggregate score decides.
+Distillation clearly changed the behavior. It did not close the teacher gap.
 
-## Baseline Evals
+## What This Post Does Not Claim
 
-Base student:
+This is not a claim that the benchmark is solved. It is not a claim that validation loss is enough. It is not a claim that a larger or sparse model automatically wins.
 
-```bash
-uv run mlx_lm.server \
-  --model mlx-community/Qwen3.5-0.8B-MLX-bf16 \
-  --host 127.0.0.1 \
-  --port 8091 \
-  --chat-template-args '{"enable_thinking": false}'
-```
+It is also not a moving-target eval. The harness, split, hidden tests, and scoring stayed fixed for these comparisons. That is the main reason the negative result is useful: when submit-row duplication made the 0.8B model worse, I could interpret it as a training-data/optimization result, not as an environment change.
 
-```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
-  --model mlx-community/Qwen3.5-0.8B-MLX-bf16 \
-  --base-url http://127.0.0.1:8091/v1 \
-  --data-dir data/sql_agent_bird_critic \
-  --max-turns 8 \
-  --max-new-tokens 1024 \
-  --output outputs/qwen3_5_0_8b_mlx_sql_agent_eval.json
-```
+The exact commands, paths, adapters, and mirrored eval JSONs are in the README and repo artifacts. This post is the map: what kind of distillation this is, how the agent loop is built, how teacher traces become SFT rows, and what the fixed harness measured.
 
-GPT teacher:
+## Takeaway
 
-```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
-  --model gpt-5.5 \
-  --base-url http://127.0.0.1:8080/v1 \
-  --reasoning-effort medium \
-  --data-dir data/sql_agent_bird_critic \
-  --max-turns 8 \
-  --max-new-tokens 2048 \
-  --output outputs/gpt_5_5_medium_sql_agent_eval.json
-```
-
-Current BAML-harness held-out results:
-
-| Run | Success | Submitted | Parse Failures | Repeated-Action Failures |
-| --- | ---: | ---: | ---: | ---: |
-| Qwen3.5-0.8B base student | 1/220 = 0.5% | 1 | 11 | 208 |
-| Qwen3.5-2B base student | 0/220 = 0.0% | 1 | 0 | 219 |
-| GPT 5.5 medium teacher | 115/220 = 52.3% | 220 | 0 | 0 |
-
-This table should only contain results from the current BAML structured-output harness.
-
-The current harness uses BAML for OpenAI-compatible model calls. The model returns one structured decision:
-
-```json
-{
-  "draft": "Need schema before final SQL.",
-  "output": {"action": "inspect_schema"}
-}
-```
-
-## Generating Teacher Data
-
-For teacher data, we run the teacher on train tasks and keep only successful trajectories:
-
-```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/generate_sql_teacher_sft_rows.py \
-  --model gpt-5.5 \
-  --base-url http://127.0.0.1:8080/v1 \
-  --reasoning-effort medium \
-  --data-dir data/sql_agent_bird_critic \
-  --partition train \
-  --max-turns 8 \
-  --max-new-tokens 2048 \
-  --task-timeout-seconds 180 \
-  --output outputs/gpt_5_5_medium_sql_agent_train_baml_sft_trace_rows.jsonl
-```
-
-Teacher generation must use the current percentage split. A full train run should report `879` attempted train tasks. If it reports `500`, the prepared data is stale.
-
-The teacher script writes BAML-canonical SFT trace rows from successful trajectories. The second notebook then turns those BAML-canonical SFT trace rows into the final SFT file:
+The first version of the pipeline works:
 
 ```text
-1-distilling-a-0-8b-tool-calling-agent/notebooks/02_explore_teacher_sft_data.ipynb
+teacher runs fixed harness
+  -> keep successful trajectories
+  -> turn each next action into SFT rows
+  -> train a smaller student
+  -> rerun the same hidden-test eval
 ```
 
-That notebook canonicalizes each assistant target:
+For a 0.8B SQL tool-use agent, that was enough to turn a model that almost never submitted into one that completed most harness runs and solved 20% of the held-out tasks. The 2B student reached 25.9%. A local Qwen35 teacher candidate reached 43.6%. GPT 5.5 medium reached 52.3%.
 
-```python
-target = json.dumps(row["teacher_action"], separators=(",", ":"), ensure_ascii=False)
-canonical_messages = row["messages"][:-1] + [{"role": "assistant", "content": target}]
-```
-
-The important detail is that we only keep rows from trajectories that fully pass the hidden tests. A beautiful-looking intermediate tool call from a failed task is not trusted. The final training target is the canonical next action, not the teacher's non-canonical text, because the harness consumes exactly one JSON action per turn.
-
-## Training
-
-The training path is one Unsloth-style script: MLX-Tune for small local experiments on this Mac, core Unsloth for the final NVIDIA runs.
-
-```text
-student models: unsloth/Qwen3.5-0.8B and unsloth/Qwen3.5-2B
-source rows: 1046
-kept rows at 4096 tokens: 1042
-train/validation rows: 990/52
-max_seq_length: 4096
-batch_size: 1
-gradient_accumulation_steps: 8
-learning_rate: 5e-5
-lora_rank: 32
-lora_alpha: 32
-optimizer steps: 372
-```
-
-On this Mac, the same Unsloth-style script can import MLX-Tune for smaller smoke runs:
-
-```bash
-uv pip install mlx-tune
-
-uv run python 1-distilling-a-0-8b-tool-calling-agent/train_unsloth.py \
-  --train-path outputs/gpt_5_5_medium_sql_agent_train_sft_canonical_3072.jsonl \
-  --output-dir outputs/qwen3_5_0_8b_mlx_tune_sql_agent_gpt_teacher_sft_3072 \
-  --learning-rate 1e-4
-```
-
-Later, the same script can move to CUDA by switching the backend and model:
-
-```bash
-uv pip install unsloth
-
-uv run python 1-distilling-a-0-8b-tool-calling-agent/train_unsloth.py \
-  --backend cuda \
-  --model unsloth/Qwen3.5-2B \
-  --train-path outputs/gpt_5_5_medium_sql_agent_train_frozen_current.jsonl \
-  --output-dir outputs/qwen3_5_2b_sql_agent_sft_cuda_gpt55_1046rows_4096_3epoch_lr5e-5_r32 \
-  --max-seq-length 4096 \
-  --batch-size 1 \
-  --grad-accum 8 \
-  --learning-rate 5e-5 \
-  --lora-rank 32 \
-  --lora-alpha 32 \
-  --max-steps 372
-```
-
-The core code shape stays the same:
-
-```python
-from mlx_tune import FastLanguageModel, SFTConfig, SFTTrainer, train_on_responses_only
-
-model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name="mlx-community/Qwen3.5-0.8B-MLX-bf16",
-    max_seq_length=3072,
-)
-model = FastLanguageModel.get_peft_model(model, r=16, lora_alpha=16)
-trainer = SFTTrainer(model=model, tokenizer=tokenizer, train_dataset=train_rows, args=SFTConfig(max_seq_length=3072))
-trainer = train_on_responses_only(trainer, response_part="<|im_start|>assistant\n")
-trainer.train()
-```
-
-This is not a parser trick or a benchmark-specific workaround. It is a portability choice: MLX-Tune on the Mac, core Unsloth on NVIDIA, one training script.
-
-## Tuned Student Eval
-
-The tuned model is evaluated through the same deterministic SQL-agent harness. For OpenAI-compatible serving, the harness can call `eval_sql_agent.py`. For the CUDA LoRA adapters in this post, I evaluated the saved HF/PEFT adapter directly on the GPU machine:
-
-```bash
-python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent_local.py \
-  --model unsloth/Qwen3.5-0.8B \
-  --adapter-path outputs/qwen3_5_0_8b_sql_agent_sft_cuda_gpt55_1046rows_4096_3epoch_lr5e-5_r32/adapter \
-  --data-dir data/sql_agent_bird_critic \
-  --partition eval \
-  --max-seq-length 8192 \
-  --max-turns 8 \
-  --max-new-tokens 512 \
-  --task-timeout-seconds 180 \
-  --temperature 0.0 \
-  --dtype bf16 \
-  --output outputs/qwen3_5_0_8b_sql_agent_sft_cuda_gpt55_1046rows_4096_3epoch_lr5e-5_r32_eval.json
-```
-
-Result:
-
-| Run | Success | Submitted | Parse Failures | Repeated-Action Failures |
-| --- | ---: | ---: | ---: | ---: |
-| Qwen3.5-0.8B base | 1/220 = 0.5% | 1 | 11 | 208 |
-| Qwen3.5-0.8B SFT, 1046 rows, 4096 context, r32 | 44/220 = 20.0% | 204 | 6 | 10 |
-| Qwen3.5-0.8B SFT, submit rows duplicated once | 38/220 = 17.3% | 199 | 9 | 11 |
-| Qwen3.5-2B base | 0/220 = 0.0% | 1 | 0 | 219 |
-| Qwen3.5-2B SFT, 1046 rows, 4096 context, r32 | 57/220 = 25.9% | 206 | 5 | 9 |
-| LFM2.5-8B-A1B SFT, 1046 rows, 4096 context, r32 | 47/220 = 21.4% | 186 | 7 | 27 |
-| GPT 5.5 medium teacher | 115/220 = 52.3% | 220 | 0 | 0 |
-
-The tuned students clearly learned the harness: they stopped repeating the same action and started submitting SQL. But the best student is still far from the teacher. On the final 1046-row frozen data, Qwen3.5-2B is the strongest student, while LFM2.5-8B-A1B does not beat it on this harness.
-
-The 0.8B improvement attempt was a clean negative result. I duplicated final `submit_sql` rows once, hoping to put more weight on final answer supervision. It made the 0.8B model worse: 38/220 instead of 44/220. It lost 17 tasks that the current 1046-row 0.8B adapter solved, gained 11 new solved tasks, and increased SQL execution errors. So the issue is not simply "make the model submit more." The small model needs better SQL decisions, not just more final-action pressure.
-
-The final adapters, eval JSONs, and frozen SFT data for this round are now mirrored back to the local repo under `outputs/remote_training_artifacts/`, `outputs/remote_eval_results/`, and `outputs/gpt_5_5_medium_sql_agent_train_frozen_current.jsonl`. Those paths are ignored artifacts, not source files, but they make the numbers in this post reproducible from the same Mac checkout.
-
-The result says three concrete things:
-
-- SFT fixed a real harness-control problem: the tuned students submit SQL instead of looping.
-- Lower validation loss did not guarantee better task success.
-- Reweighting the final `submit_sql` action shifted behavior, but did not improve SQL correctness.
-
-## What We Learned
-
-The pipeline is now real:
-
-```text
-teacher -> harness -> passing trajectories -> SFT rows -> LoRA -> same eval
-```
-
-The result should be interpreted only inside this fixed BAML harness. The environment and benchmark stay unchanged, so the comparison is about the training data, model choice, and optimization recipe rather than a moving evaluation target.
-
-## Where The Series Goes Next
-
-This post is hard-token offline distillation. The next posts can keep the same harness and change the learning signal:
-
-- **Blog 2:** soft-label/logit distillation on teacher actions
-- **Blog 3:** on-policy distillation from student rollouts and teacher corrections
-- **Blog 4:** RL/GRPO-style training with SQLite test success as reward
-
-The harness stays central. The model is only one part of the system.
+That is the honest shape of the result: real transfer, real gap, fixed measurement.
