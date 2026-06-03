@@ -22,7 +22,7 @@ submit when ready
 
 That is a different object than a single answer.
 
-This post is the first version of that experiment. I kept the benchmark fixed, kept the environment fixed, and changed only the model/training side. The commands, exact paths, and runnable reproduction details live in the README. Here I want to tell the technical story: what distillation means, what kind of distillation I used, how the harness works, how the teacher traces became training rows, which students I tried, and what the held-out eval actually said.
+This post is the first version of that experiment. I kept the benchmark fixed, kept the environment fixed, and changed only the model/training side. The commands, exact paths, and runnable reproduction details live in the README. Here I want to tell the technical story: what distillation means, what kind of distillation I used, how the harness works, how the teacher traces became training rows, which students I tried, what changed when I swapped the teacher source, and what the held-out eval actually said.
 
 ![Experiment story](assets/experiment-story-sketchnote.png)
 
@@ -45,6 +45,15 @@ The difficult part is making each word in that loop mean something precise.
 "Trajectory" means the whole action sequence, not only the final answer. If a teacher inspects schema, runs a query, and then submits SQL, that gives three decision points. Each decision point can teach the student what to do given the conversation state up to that moment.
 
 "Same eval" means the base models, teacher candidates, fine-tuned students, and negative experiments all used the same 220 held-out tasks and the same harness contract. I did not change the benchmark to make a number look better.
+
+There were two teacher-data rounds:
+
+```text
+round 1: GPT 5.5 medium teacher rows
+round 2: Qwen3.5-35B-A3B 8-bit same-family teacher rows
+```
+
+The second round was motivated by a real distillation question: the strongest teacher is not always the best teacher for a given student. A same-family teacher can produce traces that look more natural to a Qwen student, even if that teacher is weaker on the benchmark. I wanted to test that without changing the environment.
 
 That last point matters because small agent experiments are easy to fool yourself with. A small parser tweak, a looser stop condition, or a different test split can change the number. I wanted the comparison to mean: this model behaved differently under the same measurement.
 
@@ -317,7 +326,7 @@ The **teacher trace output** stores successful trajectories and eval results. It
 
 The **student training path** fine-tunes small models with LoRA on the canonical teacher-action rows.
 
-That separation is why I could compare a GPT teacher, a hosted GPT 5.4 mini baseline, a local Qwen35 teacher candidate, base Qwen students, fine-tuned Qwen students, and an LFM student under the same harness.
+That separation is why I could compare a GPT teacher, a hosted GPT 5.4 mini baseline, a local Qwen3.5-35B-A3B 8-bit teacher candidate, base Qwen students, fine-tuned Qwen students, and an LFM student under the same harness.
 
 ## The Environment
 
@@ -334,24 +343,37 @@ The GPU server is for training. The final student runs used CUDA because LoRA tr
 
 That means the blog and source-facing assets can be updated locally without keeping the remote GPU machine alive. The remote machine is only needed when I want to launch another CUDA training run or a GPU-only eval.
 
+The Mac has a lot of unified memory, which is useful for holding larger quantized models and doing slow-but-convenient local evaluation. That is different from being a fast training box. During training, the model repeatedly does dense matrix multiplies, attention, backward passes, optimizer updates, gradient checkpointing, and LoRA adapter updates. NVIDIA GPUs are built around very high-bandwidth VRAM, CUDA kernels, and tensor cores for exactly that loop.
+
+So 128 GB of Mac memory can be enough capacity to load a quantized model that would not comfortably fit in 24 GB of VRAM. But capacity is not throughput. The RTX 3090 has much less memory, yet for the student LoRA runs it is much faster because the hot training operations stay on the GPU and use optimized CUDA kernels. The Mac is a great orchestration and inspection machine here. The NVIDIA pod is the training engine.
+
 ## Teacher And Student Models
 
 I used the word "teacher" in two slightly different ways.
 
-The GPT model is the actual teacher for the SFT data in this post. Its successful train trajectories became the student training rows.
+The GPT model was the first teacher for SFT data. Its successful train trajectories became the first student training dataset.
 
-The local Qwen35 run is a teacher candidate / strong baseline. It helps answer a different question: if I run a much larger Qwen-family model in the same harness, where does it land compared with the GPT teacher and the fine-tuned students?
+The local Qwen3.5-35B-A3B 8-bit run started as a teacher candidate and strong baseline. After seeing its eval behavior, I also used it as a second teacher source. That let me ask a narrower question: if the teacher is weaker than GPT 5.5 on task success but from the same family as two of the students, does the student learn better?
 
 The model set:
 
 | Role | Models |
 | --- | --- |
-| Main teacher for SFT data | GPT 5.5 medium |
+| First teacher for SFT data | GPT 5.5 medium |
+| Same-family teacher for second SFT round | Qwen3.5-35B-A3B 8-bit |
 | Hosted smaller-model baseline | GPT 5.4 mini |
-| Strong local teacher candidate | Qwen3.5-35B-A3B 8-bit |
 | Main tiny student | Qwen3.5-0.8B |
 | Same-family larger student | Qwen3.5-2B |
 | Sparse / expert-style student comparison | LFM2.5-8B-A1B |
+
+The exact model identifiers used in the artifacts were:
+
+| Blog label | Artifact/model identifier |
+| --- | --- |
+| Qwen3.5-0.8B | `unsloth/Qwen3.5-0.8B` |
+| Qwen3.5-2B | `unsloth/Qwen3.5-2B` |
+| Qwen3.5-35B-A3B 8-bit | `mlx-community/Qwen3.5-35B-A3B-8bit` |
+| LFM2.5-8B-A1B | `LiquidAI/LFM2.5-8B-A1B` |
 
 I started with Qwen3.5-0.8B because the premise of the post is small-model distillation. A 0.8B model is small enough that a win would matter. If it can learn a useful tool-use loop, that is interesting.
 
@@ -359,9 +381,9 @@ I added Qwen3.5-2B because a same-family larger student gives a useful scale com
 
 I added LFM2.5-8B-A1B because a sparse/expert-style model is an interesting comparison. It is larger in one sense, but not equivalent to a dense Qwen. The question was whether it would dominate this harness. It did not.
 
-I added GPT 5.4 mini because it is the practical hosted-small-model baseline. If a smaller hosted model already beats the local distilled students and the local Qwen35 candidate, that is important context for what the distillation work has and has not achieved.
+I added GPT 5.4 mini because it is the practical hosted-small-model baseline. If a smaller hosted model already beats the local distilled students and the local Qwen3.5-35B-A3B 8-bit candidate, that is important context for what the distillation work has and has not achieved.
 
-I added Qwen3.5-35B-A3B 8-bit because it gives a stronger local reference point. It is not the source of the SFT rows in this run, but it tells us how a much stronger Qwen-family model behaves under the same measurement.
+I added Qwen3.5-35B-A3B 8-bit for two reasons. First, it gives a stronger local reference point. Second, it gives a same-family teacher source for the Qwen students. That matters because distillation is not only about teacher score. It is also about the distribution of traces the student is asked to imitate.
 
 ## Teacher Trace Generation
 
@@ -375,15 +397,27 @@ repeated-action failures: 0
 average turns: 2.57
 ```
 
-The key choice was to keep only successful trajectories.
+The Qwen3.5-35B-A3B 8-bit same-family teacher was also run on the same 879 train tasks. It solved fewer tasks than GPT 5.5, but it used more turns and therefore produced more next-action rows from the successful traces:
+
+```text
+Qwen3.5-35B-A3B 8-bit teacher train success: 394/879 = 44.8%
+submitted: 816/879
+parse failures: 0
+repeated-action failures: 32
+max-turn failures: 22
+runtime errors: 9
+average turns: 3.49
+```
+
+The key choice in both rounds was to keep only successful trajectories.
 
 That means if the teacher failed a task, I did not train the student on the teacher's intermediate actions from that task. A failed trace may still contain locally reasonable steps, but I do not want to teach the student from a trajectory that ended in wrong SQL.
 
 Only successful trajectories were trusted.
 
-![Teacher trajectory to SFT rows](assets/teacher-trajectory-to-sft-sketchnote.png)
+![Harness training extraction](assets/harness-training-extraction-sketchnote.png)
 
-Those 446 successful tasks became 1046 canonical SFT rows.
+The GPT teacher's 446 successful tasks became 1046 canonical SFT rows. The Qwen3.5-35B-A3B 8-bit teacher's 394 successful tasks became 1232 canonical SFT rows.
 
 Why more rows than tasks? Because a task can have multiple turns. If the teacher solved a task with three actions, that one task can produce three next-action training examples.
 
@@ -442,28 +476,40 @@ First, the benchmark split. I used a fixed seed and a fixed database/task filter
 | `netflix` | 293 | 234 | 59 |
 | **Total** | **1099** | **879** | **220** |
 
-The teacher trace run used the 879 train tasks. GPT 5.5 medium submitted on all 879, solved 446, produced 2262 parsed actions across the run, and averaged 2.57 turns per task. Only the 446 successful trajectories were used for SFT. Those successful trajectories became 1046 source SFT rows, which is about 2.35 next-action rows per successful task.
+Both teacher trace runs used the same 879 train tasks.
+
+| Teacher source | Success | Submitted | Parsed actions | Avg turns | Source SFT rows |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| GPT 5.5 medium | 446/879 = 50.7% | 879 | 2262 | 2.57 | 1046 |
+| Qwen3.5-35B-A3B 8-bit | 394/879 = 44.8% | 816 | 3064 | 3.49 | 1232 |
+
+That table is one of the most useful little surprises in the project. The Qwen3.5-35B-A3B 8-bit teacher solved fewer train tasks, but it produced more SFT rows because its successful trajectories were longer. The GPT teacher was more direct. Qwen3.5-35B-A3B 8-bit explored more.
+
+Only successful trajectories were used for SFT. For GPT, that means 446 successful trajectories. For Qwen3.5-35B-A3B 8-bit, that means 394 successful trajectories. I did not include failed teacher traces, even if the first action inside a failed trace looked reasonable.
 
 The length filter is easy to misunderstand. I did **not** filter only by the length of the target JSON action. I filtered by the full rendered training sequence: system message, user task, prior assistant actions, environment observations, and the canonical assistant target for that row. In other words, the token count is the whole chat example the student sees during SFT, not just the output. These filter numbers are training-tokenizer counts from the Qwen SFT path.
 
-| SFT data statistic | Value |
-| --- | ---: |
-| Source rows from successful teacher trajectories | 1046 |
-| Rows kept at `max_seq_length=4096` | 1042 |
-| Rows dropped for being too long | 4 |
-| Token length min / P50 / P90 / P95 | 605 / 1786 / 2948 / 3208 |
-| Longest source row before filtering | 15836 tokens |
-| Final train / validation rows | 990 / 52 |
+| SFT data statistic | GPT 5.5 teacher rows | Qwen3.5-35B-A3B 8-bit teacher rows for Qwen students | Qwen3.5-35B-A3B 8-bit teacher rows for LFM |
+| --- | ---: | ---: | ---: |
+| Source rows from successful teacher trajectories | 1046 | 1232 | 1232 |
+| Rows kept at `max_seq_length=4096` | 1042 | 1211 | 1226 |
+| Rows dropped for being too long | 4 | 21 | 6 |
+| Token length min / P50 / P90 / P95 | 605 / 1786 / 2948 / 3208 | 604 / 2014 / 3180 / 3531 | 569 / 1907 / 2984 / 3335 |
+| Longest source row before filtering | 15836 | 5908 | 5297 |
+| Final train / validation rows | 990 / 52 | 1151 / 60 | 1165 / 61, validation disabled |
 
 I chose 4096 tokens for training because almost all rows fit while keeping the run practical on the rented GPU. The few over-length rows were usually long because tool-use histories can include large schema observations or multi-turn context. Keeping them would require a longer training context for very little extra data.
 
-For reporting, I also split the SFT rows into prompt/history tokens and target/action tokens with a shared tokenizer estimate. That answers a slightly different question: how much of each row is context, and how much is the assistant action the student learns to generate?
+For reporting, I also split the frozen SFT JSONL rows into prompt/history tokens and target/action tokens with a shared tokenizer estimate. That answers a slightly different question: how much of each row is context, and how much is the assistant action the student learns to generate?
 
-| SFT row token estimate | Mean | P50 | P90 | P95 |
-| --- | ---: | ---: | ---: | ---: |
-| Prompt/history before target | 1527 | 1533 | 2555 | 2743 |
-| Target action JSON | 90 | 69 | 192 | 259 |
-| Prompt plus target | 1617 | 1633 | 2704 | 2934 |
+| SFT row token estimate | Teacher rows | Mean | P50 | P90 | P95 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Prompt/history before target | GPT 5.5 | 1339 | 1345 | 2367 | 2552 |
+| Target action JSON | GPT 5.5 | 90 | 69 | 192 | 259 |
+| Prompt plus target | GPT 5.5 | 1431 | 1447 | 2516 | 2745 |
+| Prompt/history before target | Qwen3.5-35B-A3B 8-bit | 1558 | 1556 | 2578 | 2862 |
+| Target action JSON | Qwen3.5-35B-A3B 8-bit | 83 | 71 | 150 | 191 |
+| Prompt plus target | Qwen3.5-35B-A3B 8-bit | 1643 | 1663 | 2693 | 3013 |
 
 The important shape is obvious: the target is short, while the context can be long. The student is mostly learning to emit a compact action after reading a growing task state.
 
@@ -476,20 +522,25 @@ For eval, I gave the local HF/PEFT student path a larger input window than train
 | GPT 5.4 mini hosted eval | server/model context via shim | 2048 new tokens | 8 | 180s/task | 0.0 |
 | Qwen3.5-35B-A3B 8-bit MLX eval | MLX server context | 2048 new tokens | 8 | 180s/task | 0.0 |
 
-The GPT and Qwen35 paths are OpenAI-compatible HTTP paths, so the saved eval configs record `max_new_tokens` and turn/time limits, while the server/model owns the exact prompt-context capacity. The student HF/PEFT path records an explicit `max_seq_length=8192` because it renders and runs the model locally.
+The GPT and Qwen3.5-35B-A3B 8-bit paths are OpenAI-compatible HTTP paths, so the saved eval configs record `max_new_tokens` and turn/time limits, while the server/model owns the exact prompt-context capacity. The student HF/PEFT path records an explicit `max_seq_length=8192` because it renders and runs the model locally.
 
 The student training setup was LoRA SFT on the canonical assistant action only:
 
 | Training setting | Value |
 | --- | ---: |
 | Backend | CUDA / Unsloth-style SFT |
-| Epochs / optimizer updates | 3 / 372 |
+| Epochs | 3 |
+| Optimizer updates, GPT 5.5 teacher rows | 372 |
+| Optimizer updates, Qwen3.5-35B-A3B 8-bit rows for Qwen students | 432 |
+| Optimizer updates, Qwen3.5-35B-A3B 8-bit rows for LFM2.5-8B-A1B | 438 |
 | Batch size / grad accumulation / effective batch | 1 / 8 / 8 |
 | Learning rate | 5e-5 |
 | LoRA rank / alpha | 32 / 32 |
 | Target modules | attention projections plus MLP up/down/gate projections |
 | Precision | bf16, 16-bit LoRA, not 4-bit |
 | Qwen3.5-0.8B trained parameters | 12.78M of 865.77M, about 1.48% |
+| Qwen3.5-2B trained parameters | 21.82M of 2.24B, about 0.98% |
+| LFM2.5-8B-A1B trained parameters | 11.40M of 8.48B, about 0.13% |
 
 The selection rule was deliberately simple: train only on canonical next actions from successful teacher trajectories that fit the 4096-token full-example limit. I did not include failed teacher trajectories, did not train on hidden tests or reference SQL, and did not train on the teacher's free-form prose. The target is the action the harness can execute.
 
@@ -652,21 +703,21 @@ This is exactly the kind of behavior a small model may struggle with. It has to 
 
 The base Qwen3.5-0.8B result is the clearest failure case. It solved 1 task and submitted once. The model could sometimes produce a structured action, but it did not reliably progress through the harness. This is the "not yet an agent" baseline.
 
-The fine-tuned Qwen3.5-0.8B result is the clearest proof of transfer. It solved 44 tasks and submitted 204 times. That means the model learned a large part of the interaction protocol. It still made many wrong SQL decisions, but it was now participating in the environment.
+The fine-tuned Qwen3.5-0.8B result is the clearest proof of transfer. With GPT 5.5 medium rows, it solved 44 tasks and submitted 204 times. With Qwen3.5-35B-A3B 8-bit rows, it solved 46 tasks but submitted less often and repeated more. That means the model learned a large part of the interaction protocol, but the teacher style changed the rollout shape.
 
 The submit-duplicated Qwen3.5-0.8B run is the clean negative result. It did not fail because the model refused to submit. It failed because pushing harder on final-answer rows did not improve final-answer quality. That is a useful distinction.
 
 The base Qwen3.5-2B result was surprising in the same way as the 0.8B base result. A larger base model did not automatically know how to use this harness. It still almost never submitted.
 
-The fine-tuned Qwen3.5-2B result was the best student result in this round. Same-family scale helped. But the score was still far below the teacher candidates, which means the remaining gap is not just "use any model above 2B."
+The fine-tuned Qwen3.5-2B result was the best student result in this round. It reached 57/220 with GPT 5.5 medium rows and 58/220 with Qwen3.5-35B-A3B 8-bit rows. Same-family scale helped, and same-family teacher rows helped a little more. But the score was still far below the teacher baselines, which means the remaining gap is not just "use any model above 2B."
 
-The LFM2.5-8B-A1B result is useful because it prevents an overly simple size story. It did not beat the Qwen3.5-2B student here. Architecture, tokenizer behavior, training dynamics, and harness fit all matter.
+The LFM2.5-8B-A1B result is useful because it prevents an overly simple size story. It reached 47/220 with GPT 5.5 medium rows and 50/220 with Qwen3.5-35B-A3B 8-bit rows. It did not beat the Qwen3.5-2B student here. Architecture, tokenizer behavior, training dynamics, and harness fit all matter.
 
-The Qwen3.5-35B-A3B 8-bit run gives a stronger local reference. It shows that a much stronger Qwen-family model can do far better in the same harness, but it still trails GPT 5.5 medium. That makes the teacher gap more nuanced than "local open model versus proprietary model."
+The Qwen3.5-35B-A3B 8-bit run gives a stronger local reference and a second teacher source. It shows that a much stronger Qwen-family model can do far better in the same harness than the fine-tuned students, but it still trails GPT 5.5 medium and GPT 5.4 mini. As a teacher, it produced more rows and slightly better student success, but also more repeated-action stops.
 
-The GPT 5.4 mini run is the hosted small-model reference. It solved 105 out of 220 tasks, submitted on all tasks, and had no parse, repeat, max-turn, or runtime stops. That makes it stronger than the local Qwen35 run in this eval, but still below GPT 5.5 medium.
+The GPT 5.4 mini run is the hosted small-model reference. It solved 105 out of 220 tasks, submitted on all tasks, and had no parse, repeat, max-turn, or runtime stops. That makes it stronger than the local Qwen3.5-35B-A3B 8-bit run in this eval, but still below GPT 5.5 medium.
 
-The GPT 5.5 medium run is the strongest measured result in the post so far. It also generated the successful training traces. It is not perfect, but it is the cleanest teacher we used for this first round.
+The GPT 5.5 medium run is the strongest measured result in the post. It also generated the first successful training traces. It is not perfect, but it is the cleanest teacher we used in terms of train trace control and eval stop behavior.
 
 ## Artifact Provenance
 
@@ -702,19 +753,31 @@ The behavior chart answers:
 What happened to the tasks the model did not solve?
 ```
 
+The same-family teacher chart answers:
+
+```text
+Did Qwen3.5-35B-A3B 8-bit teacher rows change student success, and what did they cost?
+```
+
 The token chart answers:
 
 ```text
-How much input context and generated action text did each run consume?
+How much generated action text did each run produce, and how much came from extra turns?
+```
+
+The training-time chart answers:
+
+```text
+How much longer did the larger/longer SFT datasets take to train?
 ```
 
 Those are different questions.
 
 A model with many repeat stops needs better control. A model with many parse stops needs better structured-output reliability. A model with many submitted-wrong tasks needs better task reasoning. A model with many max-turn stops may be exploring too long or failing to decide when it has enough information.
 
-In this experiment, the base models are dominated by repeat stops. The tuned students are dominated by submitted-wrong tasks. That is progress, but it also tells me what kind of progress it is.
+In this experiment, the base models are dominated by repeat stops. The GPT-row tuned students are dominated by submitted-wrong tasks. That is progress, but it also tells me what kind of progress it is. The Qwen3.5-35B-A3B-row students sit in between: slightly better success, but more repeat stops.
 
-The chart is not decoration. It is the shortest visual explanation of the main result.
+The charts are not decoration. They are the shortest visual explanation of the main result and the main tradeoff.
 
 ## Baseline Behavior
 
@@ -756,7 +819,7 @@ repeated-action failures: 0
 average turns: 2.14
 ```
 
-That is a strong practical baseline. It did not beat GPT 5.5 medium, but it beat every local model I measured in this post, including the much larger Qwen35 run. It also used fewer average turns than GPT 5.5 medium, which matters when the agent pays for a fresh model call at every turn.
+That is a strong practical baseline. It did not beat GPT 5.5 medium, but it beat every local model I measured in this post, including the much larger Qwen3.5-35B-A3B 8-bit run. It also used fewer average turns than GPT 5.5 medium, which matters when the agent pays for a fresh model call at every turn.
 
 The local Qwen3.5-35B-A3B 8-bit model landed lower:
 
@@ -771,15 +834,15 @@ runtime errors: 2
 
 That made it much stronger than the fine-tuned students, but still below both GPT baselines in this harness.
 
-The interesting part is not only the score. It behaved differently. Qwen35 did not have parse failures, but it sometimes spent too long in the loop or repeated itself. In one long failure, it generated a large self-debate about an ambiguous SQL prompt until the response hit the length limit. That is part of the measured behavior.
+The interesting part is not only the score. It behaved differently. Qwen3.5-35B-A3B 8-bit did not have parse failures, but it sometimes spent too long in the loop or repeated itself. In one long failure, it generated a large self-debate about an ambiguous SQL prompt until the response hit the length limit. That is part of the measured behavior.
 
 ## Fine-Tuned Student Results
 
-The main 0.8B student improved a lot:
+The first fine-tuning round used GPT 5.5 medium teacher rows. The Qwen3.5-0.8B student improved a lot:
 
 ```text
-Qwen3.5-0.8B base:  1/220 = 0.5%
-Qwen3.5-0.8B SFT:  44/220 = 20.0%
+Qwen3.5-0.8B base:                  1/220 = 0.5%
+Qwen3.5-0.8B SFT, GPT 5.5 medium rows:    44/220 = 20.0%
 ```
 
 That is a real transfer. The model went from almost never solving a task to solving 20% of the held-out eval.
@@ -787,8 +850,8 @@ That is a real transfer. The model went from almost never solving a task to solv
 But the most important change was not just the success rate. It started submitting:
 
 ```text
-Qwen3.5-0.8B base submitted: 1/220
-Qwen3.5-0.8B SFT submitted: 204/220
+Qwen3.5-0.8B base submitted:                1/220
+Qwen3.5-0.8B SFT, GPT 5.5 medium rows submitted: 204/220
 ```
 
 That is the first big result. The student learned the harness rhythm.
@@ -796,40 +859,40 @@ That is the first big result. The student learned the harness rhythm.
 The 2B student did better:
 
 ```text
-Qwen3.5-2B base:  0/220 = 0.0%
-Qwen3.5-2B SFT:  57/220 = 25.9%
+Qwen3.5-2B base:                  0/220 = 0.0%
+Qwen3.5-2B SFT, GPT 5.5 medium rows:    57/220 = 25.9%
 ```
 
 It also submitted on most tasks:
 
 ```text
-Qwen3.5-2B SFT submitted: 206/220
+Qwen3.5-2B SFT, GPT 5.5 medium rows submitted: 206/220
 ```
 
 So capacity helped, but not enough to close the teacher gap.
 
-The LFM2.5-8B-A1B run landed between the Qwen 0.8B and Qwen 2B students:
+The LFM2.5-8B-A1B run landed between the Qwen3.5-0.8B and Qwen3.5-2B students:
 
 ```text
-LFM2.5-8B-A1B SFT: 47/220 = 21.4%
+LFM2.5-8B-A1B SFT, GPT 5.5 medium rows: 47/220 = 21.4%
 ```
 
 That was useful because it pushed against an easy assumption. A larger or sparse/expert-style model did not automatically win in this harness.
 
 ## The Negative Result After Normal Fine-Tuning
 
-After the normal 0.8B SFT run, I tried one simple data-weighting experiment: duplicate the final `submit_sql` rows once.
+After the normal Qwen3.5-0.8B SFT run, I tried one simple data-weighting experiment: duplicate the final `submit_sql` rows once.
 
 The intuition was reasonable. The base problem was that small models did not submit. Maybe giving more weight to final-answer supervision would help the model become more decisive.
 
 It did not.
 
 ```text
-0.8B SFT:              44/220 = 20.0%
-0.8B SFT submit x2:    38/220 = 17.3%
+Qwen3.5-0.8B SFT, GPT 5.5 medium rows:        44/220 = 20.0%
+Qwen3.5-0.8B SFT, submit rows x2:      38/220 = 17.3%
 ```
 
-It lost 17 tasks the normal 0.8B adapter solved, gained 11 new solved tasks, and increased SQL execution errors.
+It lost 17 tasks the normal Qwen3.5-0.8B adapter solved, gained 11 new solved tasks, and increased SQL execution errors.
 
 That tells me the problem was not simply "make it submit more."
 
@@ -837,29 +900,130 @@ The normal SFT model already submitted on 204 out of 220 tasks. The bottleneck h
 
 That is a valuable negative result because the eval target did not move. The same split and same harness made the comparison interpretable.
 
+## What If The Teacher Is From The Same Family?
+
+After the normal GPT-teacher SFT round, I tried the question I was most curious about:
+
+```text
+What if the teacher is Qwen3.5-35B-A3B 8-bit,
+from the same family as Qwen3.5-0.8B and Qwen3.5-2B,
+even though it scores lower than GPT 5.5 medium on the eval?
+```
+
+This is not a strange question. In distillation, a stronger teacher is not always a better teacher. A teacher can be very capable but produce traces that are stylistically or distributionally harder for a student to imitate. A same-family teacher may use action patterns, JSON shape, draft wording, and intermediate steps that are easier for the student to learn. It may also share tokenizer and pretraining biases with the student.
+
+The Qwen3.5-35B-A3B 8-bit teacher scored lower than GPT 5.5 medium on the 220-task eval:
+
+```text
+GPT 5.5 medium eval:                 115/220 = 52.3%
+Qwen3.5-35B-A3B 8-bit local eval:     96/220 = 43.6%
+```
+
+But on the train split, the Qwen3.5-35B-A3B 8-bit teacher generated more SFT rows:
+
+```text
+GPT 5.5 medium:                 446 successful train tasks -> 1046 SFT rows
+Qwen3.5-35B-A3B 8-bit:          394 successful train tasks -> 1232 SFT rows
+```
+
+That happened because Qwen3.5-35B-A3B 8-bit used more turns. It solved fewer tasks, but the successful tasks were longer. Longer successful trajectories create more next-action supervision rows. That is useful data, but it is not free: it also means the teacher's style is more exploratory and sometimes more loop-prone.
+
+![Same-family teacher comparison](assets/same-family-teacher-comparison-chart.png)
+
+The result was small but consistent:
+
+| Student | SFT on GPT 5.5 medium rows | SFT on Qwen3.5-35B-A3B 8-bit rows | Change |
+| --- | ---: | ---: | ---: |
+| Qwen3.5-0.8B | 44/220 = 20.0% | 46/220 = 20.9% | +2 tasks |
+| Qwen3.5-2B | 57/220 = 25.9% | 58/220 = 26.4% | +1 task |
+| LFM2.5-8B-A1B | 47/220 = 21.4% | 50/220 = 22.7% | +3 tasks |
+
+So yes, the Qwen3.5-35B-A3B 8-bit teacher rows helped all three students a little on final task success. But the interpretation is not "same-family teacher solved distillation." The gains were small, and the failure shape got worse in an important way.
+
+Repeated-action stops increased:
+
+| Student | Repeat stops after GPT 5.5 medium rows | Repeat stops after Qwen3.5-35B-A3B 8-bit rows |
+| --- | ---: | ---: |
+| Qwen3.5-0.8B | 10 | 54 |
+| Qwen3.5-2B | 9 | 65 |
+| LFM2.5-8B-A1B | 27 | 38 |
+
+My read is that the Qwen3.5-35B-A3B 8-bit traces added useful same-family supervision and more intermediate states, which nudged task success up. But they also taught a loopier policy. The Qwen3.5-35B-A3B 8-bit teacher itself had more repeated-action and max-turn failures than GPT 5.5 medium. Some of that behavior appears to transfer.
+
+This is the most interesting lesson from the second round: lower validation loss and more rows did not translate into a large benchmark jump. The Qwen students trained on Qwen3.5-35B-A3B 8-bit rows had much lower validation losses than the GPT-row runs, but rollout behavior only improved by one or two solved tasks. For agents, imitation loss measures "can I predict the teacher's next action under teacher-forced context?" The benchmark measures "can I recover after my own previous actions?" Those are related, but they are not the same.
+
+## Training Time And Hardware
+
+The Qwen3.5-35B-A3B 8-bit teacher-row runs took longer to train.
+
+![Training time chart](assets/training-time-chart.png)
+
+The main reason is simple: there was more training work.
+
+| Student | GPT 5.5 medium teacher rows | Qwen3.5-35B-A3B 8-bit teacher rows | What changed |
+| --- | ---: | ---: | --- |
+| Qwen3.5-0.8B | 1042 kept rows, 372 updates, 15.9 min | 1211 kept rows, 432 updates, 22.4 min | more rows and longer P50 context |
+| Qwen3.5-2B | 1042 kept rows, 372 updates, 22.1 min | 1211 kept rows, 432 updates, 29.4 min | more rows and longer P50 context |
+| LFM2.5-8B-A1B | 1044 kept rows, 372 updates, 57.4 min | 1226 kept rows, 438 updates, 71.8 min | more rows, longer P50 context, larger sparse/expert-style model |
+
+The Qwen3.5-35B-A3B 8-bit teacher scored lower than GPT 5.5 medium, but it produced more SFT rows because its successful trajectories used more turns. More rows means more optimizer updates. Longer rows also mean more tokens per update. That is why a weaker teacher can still create a slower training dataset.
+
+This is also where the Mac versus NVIDIA GPU distinction matters. The Mac's 128 GB unified memory makes it comfortable for data preparation, charting, and some local model serving. It can hold larger quantized models than a 24 GB card might. But LoRA training is a throughput problem, not just a capacity problem. The RTX 3090's VRAM is smaller, but it has high memory bandwidth, tensor cores, and CUDA kernels built for the repeated forward/backward/update loop. That is why the rented NVIDIA GPU could train these adapters in minutes while the Mac would be painfully slow for the same job.
+
+LFM2.5-8B-A1B took the longest because it is a much larger model and needed the eager experts path on this pod. I disabled in-loop validation for the LFM runs because the provider image and filesystem/cache constraints made validation compilation unreliable. The deterministic 220-task harness eval is still the comparison that matters.
+
 ## Full Current Result Table
 
 All rows below are from the same 220-task held-out eval split and the same fixed SQL harness.
+
+![Final results sketchnote](assets/final-results-sketchnote.png)
 
 ![Held-out success chart](assets/current-eval-success-chart.png)
 
 | Run | Success | Submitted | Parse Stops | Repeat Stops | Max/Runtime Stops |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Qwen3.5-0.8B base | 1/220 = 0.5% | 1 | 11 | 208 | 0 |
-| Qwen3.5-0.8B SFT, 1046 rows | 44/220 = 20.0% | 204 | 6 | 10 | 0 |
+| Qwen3.5-0.8B SFT, GPT 5.5 medium rows | 44/220 = 20.0% | 204 | 6 | 10 | 0 |
+| Qwen3.5-0.8B SFT, Qwen3.5-35B-A3B 8-bit rows | 46/220 = 20.9% | 155 | 7 | 54 | 4 |
 | Qwen3.5-0.8B SFT, submit rows duplicated once | 38/220 = 17.3% | 199 | 9 | 11 | 1 |
 | Qwen3.5-2B base | 0/220 = 0.0% | 1 | 0 | 219 | 0 |
-| Qwen3.5-2B SFT, 1046 rows | 57/220 = 25.9% | 206 | 5 | 9 | 0 |
-| LFM2.5-8B-A1B SFT, 1046 rows | 47/220 = 21.4% | 186 | 7 | 27 | 0 |
-| Qwen3.5-35B-A3B 8-bit local teacher candidate | 96/220 = 43.6% | 202 | 0 | 9 | 9 |
+| Qwen3.5-2B SFT, GPT 5.5 medium rows | 57/220 = 25.9% | 206 | 5 | 9 | 0 |
+| Qwen3.5-2B SFT, Qwen3.5-35B-A3B 8-bit rows | 58/220 = 26.4% | 149 | 3 | 65 | 3 |
+| LFM2.5-8B-A1B SFT, GPT 5.5 medium rows | 47/220 = 21.4% | 186 | 7 | 27 | 0 |
+| LFM2.5-8B-A1B SFT, Qwen3.5-35B-A3B 8-bit rows | 50/220 = 22.7% | 170 | 6 | 38 | 6 |
+| Qwen3.5-35B-A3B 8-bit local eval | 96/220 = 43.6% | 202 | 0 | 9 | 9 |
 | GPT 5.4 mini hosted baseline | 105/220 = 47.7% | 220 | 0 | 0 | 0 |
-| GPT 5.5 medium teacher | 115/220 = 52.3% | 220 | 0 | 0 | 0 |
+| GPT 5.5 medium teacher/baseline | 115/220 = 52.3% | 220 | 0 | 0 | 0 |
+
+The performance chart is the broad comparison: base students, SFT students from both teacher sources, the local Qwen3.5-35B-A3B 8-bit baseline, GPT 5.4 mini, and GPT 5.5 medium. GPT 5.4 mini is included because it is an important practical baseline: it is smaller/cheaper than GPT 5.5 medium in this setup, but still beats all local students and the local Qwen3.5-35B-A3B 8-bit run.
+
+The updated ranking has three layers:
+
+```text
+hosted GPT baselines: strongest results
+Qwen3.5-35B-A3B 8-bit local eval: strong local reference
+fine-tuned students: real transfer, still a large gap
+```
 
 The success-rate chart is useful, but it can hide the most important behavior change. The harness behavior chart shows what happened to each eval task:
 
 ![Harness behavior chart](assets/harness-behavior-chart.png)
 
-The base students are almost all repeated-action failures. The tuned students are mostly submissions. The teachers are mostly submissions too. The remaining gap is whether those submissions pass.
+Each bar has 220 tasks in it:
+
+| Segment | Meaning |
+| --- | --- |
+| Correct submit | The model submitted SQL and the hidden tests passed |
+| Wrong submit | The model submitted SQL, but the hidden tests failed |
+| Parse stop | The model did not produce a valid structured action |
+| Repeat stop | The model repeated an action/state enough times that the harness stopped it |
+| Max-turn/runtime stop | The model hit the turn limit or a runtime/context execution problem |
+
+The base students are almost all repeated-action failures. They are not just bad at SQL; they do not really operate the agent loop. The GPT-row SFT students are mostly submissions. That is the main behavior transfer. They learned to inspect, query, and submit under the harness.
+
+The Qwen3.5-35B-A3B 8-bit-row students are more mixed. They solved slightly more tasks, but they also repeated more and submitted less. That is why I do not read the second teacher round as a simple win. It improved final task success by a small amount, while making loop control worse.
+
+The teacher baselines show the other end of the spectrum. GPT 5.5 medium and GPT 5.4 mini submit on every task with no parse, repeat, max-turn, or runtime stops. Their failures are mostly wrong submissions, meaning they know how to run the protocol but sometimes solve the SQL task incorrectly. Qwen3.5-35B-A3B 8-bit is between those worlds: much stronger task success than the students, but with some repeat and max/runtime stops.
 
 That is the shortest honest summary of the post:
 
@@ -871,39 +1035,56 @@ SFT turned "does not really operate the harness" into "operates the harness but 
 
 The other thing I wanted to know was how much context and generation each model used. This is the kind of accounting people often report for agent evals: number of model calls, prompt/input tokens, completion/output tokens, total tokens, average turns, and final task success.
 
-There is one caveat. The eval JSONs did not persist provider billing counters. So I reconstructed token estimates from the saved traces: replay the BAML-rendered messages before each model call, count those as input/history tokens, count the saved assistant action JSON as generated output tokens, and aggregate across the task. I used a shared `o200k_base` tokenizer estimate so the numbers are comparable across hosted and local runs. These are useful eval-token estimates, not exact hosted API invoices.
+There is one caveat. The eval JSONs did not persist provider billing counters. For the earlier runs, I reconstructed token estimates from the saved traces: replay the BAML-rendered messages before each model call, count those as input/history tokens, count the saved assistant action JSON as generated output tokens, and aggregate across the task. I used a shared `o200k_base` tokenizer estimate so the numbers are comparable across hosted and local runs.
+
+For the newer Qwen3.5-35B-A3B 8-bit teacher-row student evals, the mirrored JSONs keep the generated BAML outputs but not the full rendered prompt before each call. So I report generated-output tokens and turns for those runs, but I do not fabricate prompt-token totals. These are useful eval-token estimates, not exact hosted API invoices.
 
 ![Estimated token usage chart](assets/token-usage-chart.png)
+
+The chart above focuses on generated output tokens per task for all current runs. It shows the same-family teacher effect clearly: the Qwen3.5-35B-A3B 8-bit-row students do not generate much longer actions per call, but they take more turns. More turns means more generated output per task.
+
+| Run | Avg turns | Generated/call mean | Generated/call P90 | Generated/task mean |
+| --- | ---: | ---: | ---: | ---: |
+| Qwen3.5-0.8B SFT, GPT 5.5 medium rows | 2.50 | 84 | 194 | 211 |
+| Qwen3.5-0.8B SFT, Qwen3.5-35B-A3B 8-bit rows | 3.48 | 82 | 162 | 284 |
+| Qwen3.5-2B SFT, GPT 5.5 medium rows | 2.59 | 87 | 183 | 225 |
+| Qwen3.5-2B SFT, Qwen3.5-35B-A3B 8-bit rows | 3.60 | 81 | 157 | 292 |
+| LFM2.5-8B-A1B SFT, GPT 5.5 medium rows | 2.59 | 83 | 174 | 215 |
+| LFM2.5-8B-A1B SFT, Qwen3.5-35B-A3B 8-bit rows | 3.52 | 80 | 155 | 282 |
+
+This table is the generated-output side only. The prompt/input side is usually larger because each turn resends the system prompt, task, prior actions, and observations. That is why turns matter twice: each extra turn adds a generated action and forces the next prompt to include more history.
+
+For the initial GPT-row and baseline runs where prompt reconstruction was available, the fuller input/output estimate looked like this:
 
 | Run | Avg turns | Prompt/call mean | Prompt/call P90 | Generated/call mean | Generated/call P90 | Generated/task mean | Total/task mean |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | Qwen3.5-0.8B base | 2.39 | 1118 | 1993 | 89 | 122 | 212 | 2881 |
-| Qwen3.5-0.8B SFT | 2.50 | 1568 | 2545 | 84 | 194 | 211 | 4130 |
+| Qwen3.5-0.8B SFT, GPT 5.5 medium rows | 2.50 | 1568 | 2545 | 84 | 194 | 211 | 4130 |
 | Qwen3.5-0.8B SFT, submit x2 | 2.60 | 1603 | 2581 | 91 | 201 | 236 | 4411 |
 | Qwen3.5-2B base | 2.00 | 1399 | 2420 | 37 | 40 | 74 | 2878 |
-| Qwen3.5-2B SFT | 2.59 | 1611 | 2586 | 87 | 183 | 225 | 4400 |
-| LFM2.5-8B-A1B SFT | 2.59 | 1620 | 2600 | 83 | 174 | 215 | 4412 |
-| Qwen3.5-35B-A3B 8-bit | 3.57 | 1872 | 2939 | 90 | 175 | 321 | 7000 |
-| GPT 5.4 mini | 2.14 | 1471 | 2522 | 99 | 218 | 211 | 3354 |
-| GPT 5.5 medium | 2.53 | 1590 | 2601 | 107 | 246 | 269 | 4287 |
+| Qwen3.5-2B SFT, GPT 5.5 medium rows | 2.59 | 1611 | 2586 | 87 | 183 | 225 | 4400 |
+| LFM2.5-8B-A1B SFT, GPT 5.5 medium rows | 2.59 | 1620 | 2600 | 83 | 174 | 215 | 4412 |
+| Qwen3.5-35B-A3B 8-bit local eval | 3.57 | 1872 | 2939 | 90 | 175 | 321 | 7000 |
+| GPT 5.4 mini hosted baseline | 2.14 | 1471 | 2522 | 99 | 218 | 211 | 3354 |
+| GPT 5.5 medium teacher/baseline | 2.53 | 1590 | 2601 | 107 | 246 | 269 | 4287 |
 
 The main lesson is that generated action length is not the dominant cost. The action JSON is usually short. The expensive part is re-sending the growing conversation state: system instructions, user task, previous actions, schema observations, query results, and BAML's structured-output prompt.
 
-That is why average turns matter. Qwen35 generated only 90 action tokens per call on average, but it used 3.57 turns per task. Across a whole task, it consumed about 7000 estimated total tokens, much more than GPT 5.4 mini's 3354 and GPT 5.5 medium's 4287.
+That is why average turns matter. Qwen3.5-35B-A3B 8-bit generated only 90 action tokens per call on average, but it used 3.57 turns per task. Across a whole task, it consumed about 7000 estimated total tokens, much more than GPT 5.4 mini's 3354 and GPT 5.5 medium's 4287.
 
 GPT 5.4 mini is interesting here. It scored 47.7%, which is only 4.6 points below GPT 5.5 medium, while using fewer turns and fewer total estimated tokens per task. In this fixed eval, it was the best efficiency/quality point among the strong baselines.
 
 The student results tell a different story. SFT made the small models act more like agents, so they used more context than the base models. That extra context was not waste by itself; it came from actually inspecting, querying, and submitting. But the extra interaction did not automatically become teacher-level SQL judgment.
 
-## How I Read The 0.8B Result
+## How I Read The Qwen3.5-0.8B Result
 
-The 0.8B result is both good and not good enough.
+The Qwen3.5-0.8B result is both good and not good enough.
 
 It is good because the base model was basically not an agent in this environment. It solved 1 task out of 220 and submitted once. After SFT, it submitted 204 times and solved 44 tasks.
 
 That is not noise. That is behavior transfer.
 
-It is not good enough because 44/220 is still far from the teacher. GPT 5.5 medium solved 115/220. Qwen35 solved 96/220. The 0.8B student is not close to those.
+It is not good enough because 44/220 with GPT 5.5 medium rows, or 46/220 with Qwen3.5-35B-A3B 8-bit rows, is still far from the teacher baselines. GPT 5.5 medium solved 115/220. Qwen3.5-35B-A3B 8-bit solved 96/220. The Qwen3.5-0.8B student is not close to those.
 
 The right interpretation is not "distillation failed." It is also not "distillation solved it." The right interpretation is:
 
@@ -928,22 +1109,22 @@ The model has to act. The environment responds. The model acts again. The final 
 
 ## What The Strong Baselines Add
 
-The Qwen35 and GPT 5.4 mini results give two different reference points.
+The Qwen3.5-35B-A3B 8-bit and GPT 5.4 mini results give two different reference points.
 
-Qwen35 answers the local-scale question: what happens if I stay in the Qwen family but use a much larger local model? GPT 5.4 mini answers the hosted-small-model question: what does a practical smaller hosted model do before any custom distillation work?
+Qwen3.5-35B-A3B 8-bit answers the local-scale question: what happens if I stay in the Qwen family but use a much larger local model? GPT 5.4 mini answers the hosted-small-model question: what does a practical smaller hosted model do before any custom distillation work?
 
 The ranking landed like this:
 
 ```text
-Qwen3.5-2B SFT:         57/220 = 25.9%
-Qwen3.5-35B-A3B 8-bit:  96/220 = 43.6%
-GPT 5.4 mini:          105/220 = 47.7%
-GPT 5.5 medium:        115/220 = 52.3%
+Qwen3.5-2B SFT on Qwen3.5-35B-A3B 8-bit rows:  58/220 = 26.4%
+Qwen3.5-35B-A3B 8-bit local eval:               96/220 = 43.6%
+GPT 5.4 mini hosted baseline:                  105/220 = 47.7%
+GPT 5.5 medium teacher/baseline:               115/220 = 52.3%
 ```
 
-That says model strength matters a lot, but not in a perfectly simple way. A much larger local Qwen model beat every trained student, but GPT 5.4 mini still beat Qwen35 while using fewer turns and fewer estimated tokens per task. GPT 5.5 medium remained the strongest overall result.
+That says model strength matters a lot, but not in a perfectly simple way. A much larger local Qwen model beat every trained student, but GPT 5.4 mini still beat Qwen3.5-35B-A3B 8-bit while using fewer turns and fewer estimated tokens per task. GPT 5.5 medium remained the strongest overall result.
 
-It also makes the student gap more concrete. The fine-tuned 2B student is not merely below one proprietary teacher. It is below a larger local Qwen-family model, a hosted mini baseline, and the GPT teacher that generated the training traces.
+It also makes the student gap more concrete. The fine-tuned Qwen3.5-2B student is not merely below one proprietary teacher. It is below a larger local Qwen-family model, a hosted mini baseline, and the GPT teacher that generated the first training traces.
 
 ## What I Tried After Normal Fine-Tuning
 
@@ -951,10 +1132,11 @@ After the normal fine-tuning run, I tried comparisons that stayed inside the sam
 
 | Experiment | Why I tried it | What happened |
 | --- | --- | --- |
-| Qwen3.5-2B SFT | Same-family larger student | Best student: 57/220 |
-| LFM2.5-8B-A1B SFT | Larger sparse/expert-style comparison | Did not beat Qwen3.5-2B |
-| Submit-row duplication for 0.8B | Put more weight on final answers | Worse than normal 0.8B SFT |
-| Qwen3.5-35B-A3B 8-bit eval | Strong local teacher candidate | 96/220, below GPT teacher |
+| Qwen3.5-2B SFT on GPT 5.5 medium rows | Same-family larger student | 57/220 |
+| LFM2.5-8B-A1B SFT on GPT 5.5 medium rows | Larger sparse/expert-style comparison | 47/220, did not beat Qwen3.5-2B |
+| Submit-row duplication for Qwen3.5-0.8B | Put more weight on final answers | Worse than normal Qwen3.5-0.8B SFT |
+| Qwen3.5-35B-A3B 8-bit eval | Strong local teacher candidate | 96/220, below both GPT baselines |
+| SFT on Qwen3.5-35B-A3B 8-bit teacher rows | Same-family teacher source | Slightly better success for all students, but more loop-control failures |
 | GPT 5.4 mini eval | Hosted small-model baseline | 105/220, close to GPT 5.5 but cheaper in turns/tokens |
 
 The environment and benchmark stayed fixed throughout these comparisons. That is deliberate. I wanted the comparisons to stay interpretable.
@@ -1007,7 +1189,8 @@ That framing makes the results easier to understand:
 ```text
 base Qwen models: weak control, weak task success
 tuned Qwen models: much better control, still limited task success
-Qwen35: better task success, but more turns and still below hosted GPT
+Qwen3.5-35B-A3B 8-bit teacher rows: a little more task success, but more loopiness
+Qwen3.5-35B-A3B 8-bit local eval: better task success, but more turns and still below hosted GPT
 GPT 5.4 mini: strong hosted-small baseline
 GPT 5.5 teacher: best task success in this run
 ```
@@ -1016,7 +1199,7 @@ GPT 5.5 teacher: best task success in this run
 
 This is not a claim that the benchmark is solved.
 
-It is not a claim that a 0.8B model can be compressed to GPT-level SQL-tool behavior with 1046 rows.
+It is not a claim that a 0.8B model can be compressed to GPT-level SQL-tool behavior with 1046 or 1232 teacher rows.
 
 It is not a claim that validation loss is the metric that matters.
 
@@ -1038,9 +1221,9 @@ teacher runs fixed harness
   -> rerun the same hidden-test eval
 ```
 
-For a 0.8B SQL tool-use agent, that was enough to turn a model that almost never submitted into one that completed most harness runs and solved 20% of the held-out tasks.
+For a Qwen3.5-0.8B SQL tool-use agent, that was enough to turn a model that almost never submitted into one that completed many harness runs and solved about 20% of the held-out tasks.
 
-The 2B student reached 25.9%. The local Qwen35 teacher candidate reached 43.6%. GPT 5.4 mini reached 47.7%. GPT 5.5 medium reached 52.3%.
+The best student was Qwen3.5-2B trained on Qwen3.5-35B-A3B 8-bit teacher rows: 58/220 = 26.4%. The local Qwen3.5-35B-A3B 8-bit model reached 43.6%. GPT 5.4 mini reached 47.7%. GPT 5.5 medium reached 52.3%.
 
 That is the honest shape of the result:
 
