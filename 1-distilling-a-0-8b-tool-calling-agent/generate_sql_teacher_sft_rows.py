@@ -71,6 +71,7 @@ def main() -> None:
     parser.add_argument("--reasoning-effort", default=None)
     parser.add_argument("--data-dir", type=Path, default=cfg.DATA_DIR / "sql_agent_bird_critic")
     parser.add_argument("--partition", choices=["train", "eval"], default="train")
+    parser.add_argument("--ids-path", type=Path, default=None, help="Optional newline or JSON-list file of exact task ids to run.")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--max-new-tokens", type=int, default=1024)
     parser.add_argument("--max-turns", type=int, default=8)
@@ -81,6 +82,13 @@ def main() -> None:
     args = parser.parse_args()
 
     rows = sql_agent.load_rows(args.data_dir, args.partition, args.limit)
+    if args.ids_path is not None:
+        raw_ids = args.ids_path.read_text(encoding="utf-8").strip()
+        selected_ids = {str(task_id).strip() for task_id in (json.loads(raw_ids) if raw_ids.startswith("[") else raw_ids.splitlines()) if str(task_id).strip()}
+        rows = [row for row in rows if row["id"] in selected_ids]
+        missing_ids = selected_ids - {row["id"] for row in rows}
+        if missing_ids:
+            raise ValueError(f"{args.ids_path} contains ids not found in {args.partition}: {sorted(missing_ids)[:20]}")
     print("Harness LLM call path: BAML over OpenAI-compatible HTTP", flush=True)
     output_path = args.output or cfg.OUTPUT_DIR / f"{cfg.filename_slug(args.model)}_sql_agent_{args.partition}_baml_sft_trace_rows.jsonl"
     report_path = output_path.with_suffix(".report.json")
@@ -115,7 +123,14 @@ def main() -> None:
             if not args.no_task_isolation:
                 result = run_openai_task_with_timeout(row, args)
             else:
-                result = sql_agent.run_task(row, data_dir=args.data_dir, generate=generate, max_turns=args.max_turns, keep_messages=True)
+                result = sql_agent.run_task_with_timeout(
+                    row,
+                    data_dir=args.data_dir,
+                    generate=generate,
+                    max_turns=args.max_turns,
+                    timeout_seconds=args.task_timeout_seconds,
+                    keep_messages=True,
+                )
         except Exception as error:
             result = runtime_error_result(row, error)
         results.append(result)

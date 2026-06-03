@@ -20,9 +20,13 @@ We will build the post around one loop:
 4. Keep only successful teacher trajectories.
 5. Convert each successful trajectory into supervised fine-tuning rows.
 6. Train the 0.8B student with hard-token SFT.
-7. Re-run the same eval and compare.
+7. Re-run the same eval, then compare nearby student variants under the same harness.
 
 The important constraint is fairness: the baseline student, teachers, trajectory collection, training data, and tuned-student eval all use the same structured harness contract.
+
+## Experiment Cost
+
+I also want the cost accounting to stay visible. The GPT teacher run used my ChatGPT subscription through a local OpenAI-compatible shim, not direct pay-per-token API billing. The student training ran on a rented RunPod GPU server, and the total rented-GPU training cost for this round was about 20 euros.
 
 ## What Distillation Means Here
 
@@ -183,61 +187,50 @@ def parse_decision(text):
 
 ## A Real Task
 
-Here is one held-out eval task:
+Here is one held-out eval task from the current split:
 
 ```text
-Task id: TRAIN_1155
-Database: hockey
+Task id: TRAIN_2367
+Database: chinook
 Category: Query
 
 User issue:
-In the hockey database, we have a table `abbrev` storing abbreviation
-types, codes, and their full names. We need to retrieve the Type, Code,
-and Fullname for each entry. An initial attempt might involve incorrect
-data type handling or referencing columns incorrectly.
+I want to find the latest track_id and use that id to filter records in
+the track table.
 
 Buggy SQL:
-SELECT CAST(Type AS INTEGER) AS TypeId, Code, Fullname FROM abbrev
+WITH vars AS (SELECT COUNT(*) AS vars_id FROM track)
+SELECT * FROM track WHERE track_id = vars_id
 
 Reference SQL, hidden from model:
-SELECT Type, Code, Fullname FROM abbrev
+WITH vars AS (SELECT MAX(track_id) AS vars_id FROM track)
+SELECT * FROM track WHERE track_id = (SELECT vars_id FROM vars)
 ```
 
-The base student starts in the right direction but does not follow the action contract reliably:
+The base student starts in the right direction, but gets stuck repeating the same tool action:
 
 ```text
 Turn 1 parsed action:
 {"action": "inspect_schema"}
 
 Environment:
-schema text, including table abbrev(Type, Code, Fullname)
+schema text, including table track(track_id, name, ...)
 
-Turn 2 BAML-canonical output:
-The user wants me to fix a SQL query that retrieves abbreviations...
-
-Parsed action:
-None
+Turn 2 parsed action:
+{"action": "inspect_schema"}
 
 Stop reason:
-parse_failure
+repeated_action
 ```
 
 The GPT teacher solves it:
 
 ```text
-Turn 1:
+Turn 1 parsed action:
 {"action":"inspect_schema"}
 
-Turn 2:
-{"action":"run_sql_query","sql":"SELECT Type, Code, Fullname FROM abbrev LIMIT 5"}
-
-Environment:
-[["Team", "MTL", "Montreal Canadiens"],
- ["Team", "TOR", "Toronto Maple Leafs"],
- ["League", "NHL", "National Hockey League"]]
-
-Turn 3:
-{"action":"submit_sql","sql":["SELECT Type, Code, Fullname FROM abbrev"]}
+Turn 2 parsed action:
+{"action":"submit_sql","sql":["WITH vars AS (SELECT MAX(track_id) AS vars_id FROM track) SELECT * FROM track WHERE track_id = (SELECT vars_id FROM vars);"]}
 
 Score:
 pass
@@ -250,10 +243,13 @@ Turn 1 parsed action:
 {"action": "inspect_schema"}
 
 Turn 2 parsed action:
-{"action": "run_sql_query", "sql": "SELECT Type, Code, Fullname FROM abbrev"}
+{"action": "run_sql_query", "sql": "SELECT track_id, name FROM track ORDER BY track_id DESC LIMIT 1;"}
+
+Environment:
+{"ok": true, "rows": [[3503, "Koyaanisqatsi"]], "row_count": 1, "truncated": false}
 
 Turn 3 parsed action:
-{"action": "submit_sql", "sql": ["SELECT Type, Code, Fullname FROM abbrev"]}
+{"action": "submit_sql", "sql": ["SELECT * FROM track WHERE track_id = (SELECT MAX(track_id) FROM track);"]}
 
 Score:
 pass
@@ -296,34 +292,13 @@ uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
   --output outputs/gpt_5_5_medium_sql_agent_eval.json
 ```
 
-Qwen teacher:
-
-```bash
-uv run mlx_lm.server \
-  --model mlx-community/Qwen3.5-35B-A3B-8bit \
-  --host 127.0.0.1 \
-  --port 8092 \
-  --chat-template-args '{"enable_thinking": false}'
-```
-
-```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
-  --model mlx-community/Qwen3.5-35B-A3B-8bit \
-  --base-url http://127.0.0.1:8092/v1 \
-  --data-dir data/sql_agent_bird_critic \
-  --max-turns 8 \
-  --max-new-tokens 2048 \
-  --output outputs/qwen3_5_35b_a3b_8bit_mlx_server_sql_agent_eval.json
-```
-
 Current BAML-harness held-out results:
 
-| Run | Success | Submitted | Parse Failures | Max-Turn Failures |
+| Run | Success | Submitted | Parse Failures | Repeated-Action Failures |
 | --- | ---: | ---: | ---: | ---: |
-| Qwen3.5-0.8B base student | rerun | rerun | rerun | rerun |
-| LFM2.5-8B-A1B MLX 8-bit baseline | rerun | rerun | rerun | rerun |
-| Qwen3.5-35B-A3B 8-bit teacher | rerun | rerun | rerun | rerun |
-| GPT 5.5 medium teacher | rerun | rerun | rerun | rerun |
+| Qwen3.5-0.8B base student | 1/220 = 0.5% | 1 | 11 | 208 |
+| Qwen3.5-2B base student | 0/220 = 0.0% | 1 | 0 | 219 |
+| GPT 5.5 medium teacher | 115/220 = 52.3% | 220 | 0 | 0 |
 
 This table should only contain results from the current BAML structured-output harness.
 
@@ -372,18 +347,23 @@ The important detail is that we only keep rows from trajectories that fully pass
 
 ## Training
 
-The training path is one Unsloth-style script: MLX-Tune on this Mac, core Unsloth on NVIDIA later.
+The training path is one Unsloth-style script: MLX-Tune for small local experiments on this Mac, core Unsloth for the final NVIDIA runs.
 
 ```text
-max_seq_length: 3072
+student models: unsloth/Qwen3.5-0.8B and unsloth/Qwen3.5-2B
+source rows: 1046
+kept rows at 4096 tokens: 1042
+train/validation rows: 990/52
+max_seq_length: 4096
 batch_size: 1
 gradient_accumulation_steps: 8
-learning_rate: 1e-5
-lora_rank: 16
-lora_alpha: 16
+learning_rate: 5e-5
+lora_rank: 32
+lora_alpha: 32
+optimizer steps: 372
 ```
 
-On this Mac, the same Unsloth-style script imports MLX-Tune:
+On this Mac, the same Unsloth-style script can import MLX-Tune for smaller smoke runs:
 
 ```bash
 uv pip install mlx-tune
@@ -401,10 +381,16 @@ uv pip install unsloth
 
 uv run python 1-distilling-a-0-8b-tool-calling-agent/train_unsloth.py \
   --backend cuda \
-  --model unsloth/Qwen3.5-0.8B \
-  --train-path outputs/gpt_5_5_medium_sql_agent_train_sft_canonical_3072.jsonl \
-  --output-dir outputs/qwen3_5_0_8b_unsloth_sql_agent_gpt_teacher_sft_3072 \
-  --learning-rate 1e-4
+  --model unsloth/Qwen3.5-2B \
+  --train-path outputs/gpt_5_5_medium_sql_agent_train_frozen_current.jsonl \
+  --output-dir outputs/qwen3_5_2b_sql_agent_sft_cuda_gpt55_1046rows_4096_3epoch_lr5e-5_r32 \
+  --max-seq-length 4096 \
+  --batch-size 1 \
+  --grad-accum 8 \
+  --learning-rate 5e-5 \
+  --lora-rank 32 \
+  --lora-alpha 32 \
+  --max-steps 372
 ```
 
 The core code shape stays the same:
@@ -426,43 +412,46 @@ This is not a parser trick or a benchmark-specific workaround. It is a portabili
 
 ## Tuned Student Eval
 
-The tuned model should be evaluated through the same BAML harness. On this Mac, serve the MLX-Tune adapter with `mlx_lm.server`:
+The tuned model is evaluated through the same deterministic SQL-agent harness. For OpenAI-compatible serving, the harness can call `eval_sql_agent.py`. For the CUDA LoRA adapters in this post, I evaluated the saved HF/PEFT adapter directly on the GPU machine:
 
 ```bash
-uv run mlx_lm.server \
-  --model mlx-community/Qwen3.5-0.8B-MLX-bf16 \
-  --adapter-path outputs/qwen3_5_0_8b_mlx_tune_sql_agent_gpt_teacher_sft_3072/adapter \
-  --host 127.0.0.1 \
-  --port 8095 \
-  --chat-template-args '{"enable_thinking": false}'
-```
-
-Then run:
-
-```bash
-uv run python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent.py \
-  --model mlx-community/Qwen3.5-0.8B-MLX-bf16 \
-  --base-url http://127.0.0.1:8095/v1 \
+python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent_local.py \
+  --model unsloth/Qwen3.5-0.8B \
+  --adapter-path outputs/qwen3_5_0_8b_sql_agent_sft_cuda_gpt55_1046rows_4096_3epoch_lr5e-5_r32/adapter \
   --data-dir data/sql_agent_bird_critic \
+  --partition eval \
+  --max-seq-length 8192 \
   --max-turns 8 \
-  --max-new-tokens 1024 \
-  --output outputs/qwen3_5_0_8b_mlx_tune_sql_agent_gpt_teacher_sft_3072_eval.json
+  --max-new-tokens 512 \
+  --task-timeout-seconds 180 \
+  --temperature 0.0 \
+  --dtype bf16 \
+  --output outputs/qwen3_5_0_8b_sql_agent_sft_cuda_gpt55_1046rows_4096_3epoch_lr5e-5_r32_eval.json
 ```
 
 Result:
 
-| Run | Success | Submitted | Parse Failures | Max-Turn Failures |
+| Run | Success | Submitted | Parse Failures | Repeated-Action Failures |
 | --- | ---: | ---: | ---: | ---: |
-| Base student | rerun | rerun | rerun | rerun |
-| Tuned student | rerun | rerun | rerun | rerun |
+| Qwen3.5-0.8B base | 1/220 = 0.5% | 1 | 11 | 208 |
+| Qwen3.5-0.8B SFT, 1046 rows, 4096 context, r32 | 44/220 = 20.0% | 204 | 6 | 10 |
+| Qwen3.5-0.8B SFT, submit rows duplicated once | 38/220 = 17.3% | 199 | 9 | 11 |
+| Qwen3.5-2B base | 0/220 = 0.0% | 1 | 0 | 219 |
+| Qwen3.5-2B SFT, 1046 rows, 4096 context, r32 | 57/220 = 25.9% | 206 | 5 | 9 |
+| LFM2.5-8B-A1B SFT, 1046 rows, 4096 context, r32 | 47/220 = 21.4% | 186 | 7 | 27 |
+| GPT 5.5 medium teacher | 115/220 = 52.3% | 220 | 0 | 0 |
 
-If the tuned model does not improve, the likely reasons to inspect are:
+The tuned students clearly learned the harness: they stopped repeating the same action and started submitting SQL. But the best student is still far from the teacher. On the final 1046-row frozen data, Qwen3.5-2B is the strongest student, while LFM2.5-8B-A1B does not beat it on this harness.
 
-- too few successful teacher trajectories
-- too many long rows filtered out by the sequence-length limit
-- weak format learning despite the structured harness
-- SQL task diversity that is still too broad for the small student
-- a conservative LoRA recipe that underfits
+The 0.8B improvement attempt was a clean negative result. I duplicated final `submit_sql` rows once, hoping to put more weight on final answer supervision. It made the 0.8B model worse: 38/220 instead of 44/220. It lost 17 tasks that the current 1046-row 0.8B adapter solved, gained 11 new solved tasks, and increased SQL execution errors. So the issue is not simply "make the model submit more." The small model needs better SQL decisions, not just more final-action pressure.
+
+The final adapters, eval JSONs, and frozen SFT data for this round are now mirrored back to the local repo under `outputs/remote_training_artifacts/`, `outputs/remote_eval_results/`, and `outputs/gpt_5_5_medium_sql_agent_train_frozen_current.jsonl`. Those paths are ignored artifacts, not source files, but they make the numbers in this post reproducible from the same Mac checkout.
+
+The result says three concrete things:
+
+- SFT fixed a real harness-control problem: the tuned students submit SQL instead of looping.
+- Lower validation loss did not guarantee better task success.
+- Reweighting the final `submit_sql` action shifted behavior, but did not improve SQL correctness.
 
 ## What We Learned
 
@@ -472,13 +461,7 @@ The pipeline is now real:
 teacher -> harness -> passing trajectories -> SFT rows -> LoRA -> same eval
 ```
 
-The result should be interpreted only after rerunning every model through the same BAML harness.
-
-For the next iteration of Blog 1, the highest-leverage fixes are:
-
-1. Run the current canonical 3072-token SFT file through the recommended Unsloth recipe.
-2. Add a small format-only warmup set so the student learns to emit one JSON action per turn.
-3. Try a stronger or slightly larger student if the 0.8B model keeps failing the action protocol.
+The result should be interpreted only inside this fixed BAML harness. The environment and benchmark stay unchanged, so the comparison is about the training data, model choice, and optimization recipe rather than a moving evaluation target.
 
 ## Where The Series Goes Next
 

@@ -38,13 +38,17 @@ def main() -> None:
     parser.add_argument("--lora-rank", type=int, default=cfg.SFT_LORA_RANK)
     parser.add_argument("--lora-alpha", type=int, default=cfg.SFT_LORA_ALPHA)
     parser.add_argument("--target-modules", nargs="+", default=None)
+    parser.add_argument("--experts-implementation", choices=["eager", "batched_mm", "grouped_mm"], default=None)
     parser.add_argument("--mlx-num-layers", type=int, default=cfg.SFT_MLX_NUM_LAYERS)
     parser.add_argument("--validation-fraction", type=float, default=cfg.SFT_VALIDATION_FRACTION)
     parser.add_argument("--seed", type=int, default=cfg.SFT_SEED)
     parser.add_argument("--max-steps", type=int, default=-1)
+    parser.add_argument("--save-total-limit", type=int, default=6)
     parser.add_argument("--load-in-4bit", action="store_true")
     parser.add_argument("--mlx-subprocess", action="store_true", help="On Apple Silicon, train through MLX-Tune's mlx_lm.lora subprocess path.")
     parser.add_argument("--no-grad-checkpoint", action="store_true")
+    parser.add_argument("--no-validation", action="store_true")
+    parser.add_argument("--resume-from-checkpoint", type=Path, default=None)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -132,6 +136,7 @@ def main() -> None:
     print("Estimated optimizer updates per epoch:", optimizer_steps_per_epoch)
     print("Gradient accumulation used:", actual_grad_accum)
     print("LoRA target modules:", target_modules)
+    print("Experts implementation:", args.experts_implementation)
     if args.backend == "mlx":
         print("MLX-Tune forwards gradient accumulation:", mlx_grad_accumulation_is_forwarded)
         print("MLX subprocess training:", args.mlx_subprocess)
@@ -139,6 +144,11 @@ def main() -> None:
     print("Adapter dir:", adapter_dir)
     print("Load in 4bit:", args.load_in_4bit)
     print("Gradient checkpointing:", not args.no_grad_checkpoint)
+    print("Validation during training:", not args.no_validation)
+    if args.resume_from_checkpoint is not None:
+        if not args.resume_from_checkpoint.exists():
+            raise FileNotFoundError(f"Missing checkpoint: {args.resume_from_checkpoint}")
+        print("Resume checkpoint:", args.resume_from_checkpoint)
     if args.dry_run:
         return
 
@@ -154,6 +164,14 @@ def main() -> None:
             dtype=None,
             load_in_4bit=args.load_in_4bit,
         )
+        if args.experts_implementation is not None:
+            expert_configs = {}
+            for module in model.modules():
+                config = getattr(module, "config", None)
+                if config is not None and hasattr(config, "_experts_implementation"):
+                    expert_configs[id(config)] = config
+            for config in expert_configs.values():
+                config._experts_implementation = args.experts_implementation
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
         model = FastLanguageModel.get_peft_model(
@@ -174,7 +192,7 @@ def main() -> None:
             model=model,
             tokenizer=tokenizer,
             train_dataset=train_dataset,
-            eval_dataset=valid_dataset,
+            eval_dataset=None if args.no_validation else valid_dataset,
             args=SFTConfig(
                 output_dir=str(work_dir / "mlx_trainer_data"),
                 max_steps=max_steps,
@@ -187,7 +205,7 @@ def main() -> None:
                 max_seq_length=args.max_seq_length,
                 grad_checkpoint=not args.no_grad_checkpoint,
                 num_layers=args.mlx_num_layers,
-                val_batches=5,
+                val_batches=0 if args.no_validation else 5,
                 steps_per_eval=max(1, min(200, max_steps)),
                 use_native_training=not args.mlx_subprocess,
             ),
@@ -217,11 +235,11 @@ def main() -> None:
                 gradient_accumulation_steps=args.grad_accum,
                 learning_rate=args.learning_rate,
                 logging_steps=1,
-                eval_strategy="steps",
+                eval_strategy="no" if args.no_validation else "steps",
                 eval_steps=max(1, min(100, max_steps)),
                 save_strategy="steps",
                 save_steps=max(1, min(100, max_steps)),
-                save_total_limit=2,
+                save_total_limit=args.save_total_limit,
                 bf16=is_bfloat16_supported(),
                 fp16=not is_bfloat16_supported(),
                 gradient_checkpointing=not args.no_grad_checkpoint,
@@ -232,11 +250,11 @@ def main() -> None:
                 seed=args.seed,
             ),
             train_dataset=train_dataset,
-            eval_dataset=valid_dataset,
+            eval_dataset=None if args.no_validation else valid_dataset,
             processing_class=tokenizer,
             data_collator=DataCollatorForSeq2Seq(tokenizer, padding=True, label_pad_token_id=-100, return_tensors="pt"),
         )
-    trainer.train()
+    trainer.train(resume_from_checkpoint=str(args.resume_from_checkpoint) if args.resume_from_checkpoint else None)
     if args.backend == "cuda":
         trainer.save_model(str(adapter_dir))
     tokenizer.save_pretrained(str(adapter_dir))
@@ -248,6 +266,8 @@ def main() -> None:
             "training_iterations_per_epoch": steps_per_epoch,
             "estimated_optimizer_updates_per_epoch": optimizer_steps_per_epoch,
             "actual_grad_accum": actual_grad_accum,
+            "resume_from_checkpoint": args.resume_from_checkpoint,
+            "experts_implementation": args.experts_implementation,
             "target_modules": target_modules,
             "adapter_dir": adapter_dir,
             "stats": prepared["stats"],

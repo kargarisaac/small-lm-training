@@ -191,6 +191,8 @@ sudo systemctl restart nvidia-power-limit.service
 
 The 150W cap is a stability guard, not a VRAM limiter. It reduces maximum electrical/thermal load; it does not reduce the model's GPU memory allocation. For memory pressure, use smaller models, lower context length, lower batch/concurrency, quantization, or more VRAM/system RAM.
 
+Some rented containers do not allow changing the power limit from inside the pod. On the RunPod RTX 3090 container, `nvidia-smi -pl 150` returned `Insufficient Permissions` even as root. In that case, record the limitation and monitor the run; fixing it requires a provider/host configuration that allows power management, not a Python training-code change.
+
 ## Fresh CUDA Server Setup
 
 For a new rented NVIDIA machine, use one repo-local environment:
@@ -251,17 +253,48 @@ Run the real student training explicitly:
 ```bash
 python 1-distilling-a-0-8b-tool-calling-agent/train_unsloth.py \
   --backend cuda \
-  --model unsloth/Qwen3.5-0.8B \
+  --model unsloth/Qwen3.5-2B \
   --train-path outputs/gpt_5_5_medium_sql_agent_train_frozen_current.jsonl \
-  --output-dir outputs/qwen3_5_0_8b_sql_agent_sft_cuda_gpt55_653rows_3072_2epoch_lr5e-5_r16 \
-  --max-seq-length 3072 \
+  --output-dir outputs/qwen3_5_2b_sql_agent_sft_cuda_gpt55_1046rows_4096_3epoch_lr5e-5_r32 \
+  --max-seq-length 4096 \
   --batch-size 1 \
   --grad-accum 8 \
   --learning-rate 5e-5 \
-  --lora-rank 16 \
-  --lora-alpha 16 \
-  --max-steps 146
+  --lora-rank 32 \
+  --lora-alpha 32 \
+  --max-steps 372
 ```
+
+For `LiquidAI/LFM2.5-8B-A1B` on an RTX 3090 with this Torch/Transformers stack, the default MoE `grouped_mm` backend calls a kernel that requires a newer GPU architecture. Use the Transformers eager experts backend and keep temp/Triton caches off the full root filesystem:
+
+```bash
+export TMPDIR=/dev/shm/sql-agent-tmp
+export HF_HOME=/dev/shm/hf-cache-lfm
+export HF_HUB_CACHE=/dev/shm/hf-cache-lfm/hub
+export TRANSFORMERS_CACHE=/dev/shm/hf-cache-lfm/transformers
+export TRITON_CACHE_DIR="$PWD/.triton-cache"
+export UNSLOTH_COMPILE_DISABLE=1
+export UNSLOTH_COMPILE_LOCATION="$PWD/.unsloth-compile-eager"
+export TORCH_COMPILE_DISABLE=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+python 1-distilling-a-0-8b-tool-calling-agent/train_unsloth.py \
+  --backend cuda \
+  --model LiquidAI/LFM2.5-8B-A1B \
+  --train-path outputs/gpt_5_5_medium_sql_agent_train_frozen_current.jsonl \
+  --output-dir outputs/lfm2_5_8b_a1b_sql_agent_sft_cuda_gpt55_1046rows_4096_3epoch_lr5e-5_r32_eager \
+  --max-seq-length 4096 \
+  --batch-size 1 \
+  --grad-accum 8 \
+  --learning-rate 5e-5 \
+  --lora-rank 32 \
+  --lora-alpha 32 \
+  --max-steps 372 \
+  --experts-implementation eager \
+  --no-validation
+```
+
+The `--no-validation` flag is specific to this LFM/RTX-3090 pod path. The provider image has `/dev/shm` mounted `noexec`, `/` full, and the `/workspace` cache path hit a write quota during Triton validation-loss compilation. We skip in-loop validation and rely on the deterministic held-out harness eval after training.
 
 Teacher generation is intentionally not part of this server setup. The normal flow is to generate/curate teacher traces elsewhere, copy the SFT JSONL to the GPU server, and train only the student on the rented GPU.
 
@@ -269,24 +302,28 @@ Validated RTX 3090 frozen-run config:
 
 ```text
 teacher data: outputs/gpt_5_5_medium_sql_agent_train_frozen_current.jsonl
-source rows: 653
-kept rows at 3072 tokens: 611
-train rows: 581
-validation rows: 30
-max sequence length: 3072
-optimizer steps: 146
+source rows: 1046
+kept rows at 4096 tokens: 1042
+train rows: 990
+validation rows: 52
+max sequence length: 4096
+optimizer steps: 372
 batch size: 1
 gradient accumulation: 8
 learning rate: 5e-5
-LoRA rank/alpha: 16/16
+LoRA rank/alpha: 32/32
 ```
 
 Completed adapter runs from this config:
 
 | Model | Runtime | Final validation loss | Local artifact |
 | --- | ---: | ---: | --- |
-| `unsloth/Qwen3.5-0.8B` | 453s | 0.4125 | `outputs/remote_training_artifacts/qwen3_5_0_8b_sql_agent_sft_cuda_gpt55_653rows_3072_2epoch_lr5e-5_r16/` |
-| `unsloth/Qwen3.5-2B` | 524s | 0.3518 | `outputs/remote_training_artifacts/qwen3_5_2b_sql_agent_sft_cuda_gpt55_653rows_3072_2epoch_lr5e-5_r16/` |
+| `unsloth/Qwen3.5-0.8B` | 956.6s | 0.3494 | `outputs/remote_training_artifacts/qwen3_5_0_8b_sql_agent_sft_cuda_gpt55_1046rows_4096_3epoch_lr5e-5_r32/` |
+| `unsloth/Qwen3.5-2B` | 1327s | 0.2966 | `outputs/remote_training_artifacts/qwen3_5_2b_sql_agent_sft_cuda_gpt55_1046rows_4096_3epoch_lr5e-5_r32/` |
+| `LiquidAI/LFM2.5-8B-A1B` | 3446s | n/a, `--no-validation` | `outputs/remote_training_artifacts/lfm2_5_8b_a1b_sql_agent_sft_cuda_gpt55_1046rows_4096_3epoch_lr5e-5_r32_eager_noeval/` |
+| `unsloth/Qwen3.5-0.8B`, submit rows duplicated once | 1404s | 0.3591 | `outputs/remote_training_artifacts/qwen3_5_0_8b_sql_agent_sft_cuda_gpt55_1492rows_submit2x_4096_3epoch_lr5e-5_r32_rootcache/` |
+
+On the saturated RunPod pod, the only non-destructive way to keep Qwen3.5-0.8B training on the fast path was to reuse the root compile caches from the earlier successful run. Setting `TRITON_CACHE_DIR` under `/dev/shm` failed because that mount is `noexec`; setting all Torch/Inductor caches under `/workspace` hit provider file quota; disabling compile broke the Qwen3.5 flash-linear-attention path. If this pod is rebuilt, prefer a clean executable cache path with real write quota before starting long training.
 
 ## 1. Explore And Prepare Data
 
@@ -491,8 +528,8 @@ Run:
 Notebook 02 converts successful BAML-canonical trace rows into the final training file:
 
 ```text
-outputs/gpt_5_5_medium_sql_agent_train_frozen_20260602_153955_653rows.jsonl
-outputs/gpt_5_5_medium_sql_agent_train_frozen_20260602_153955_653rows.report.json
+outputs/gpt_5_5_medium_sql_agent_train_frozen_20260602_213333_1046rows.jsonl
+outputs/gpt_5_5_medium_sql_agent_train_frozen_20260602_213333_1046rows.report.json
 outputs/gpt_5_5_medium_sql_agent_train_frozen_current.jsonl
 ```
 
@@ -503,12 +540,12 @@ This matters because the harness consumes exactly one JSON action per assistant 
 Shared defaults:
 
 ```text
-max_seq_length: 3072
+max_seq_length: 4096
 batch_size: 1
 gradient_accumulation_steps: 8
-learning_rate: 1e-5
-lora_rank: 16
-lora_alpha: 16
+learning_rate: 5e-5
+lora_rank: 32
+lora_alpha: 32
 validation_fraction: 0.05
 seed: 42
 ```
@@ -541,14 +578,14 @@ PY
 Current frozen teacher data used for the CUDA runs:
 
 ```text
-source rows: 653
-3072 tokens: 611/653 rows fit
-4096 tokens: 650/653 rows fit
-3072-token train/validation split: 581/30
-p50 tokens: 1777
-p90 tokens: 2921
-p95 tokens: 3177
-max tokens: 4315
+teacher train success: 446/879 = 50.7%
+source rows: 1046
+4096 tokens: 1042/1046 rows fit
+4096-token train/validation split: 990/52
+p50 tokens: 1786
+p90 tokens: 2948
+p95 tokens: 3208
+max tokens: 15836
 ```
 
 For MLX-LM, training iterations are microsteps; gradient accumulation changes optimizer-update frequency but does not reduce how many examples must run through forward/backward for one pass. On this Mac, full `3072` context can still hit the Metal allocation limit during backward. CUDA Unsloth can use the larger effective batch through `--grad-accum 8`.
@@ -579,16 +616,16 @@ uv pip install unsloth
 
 uv run python 1-distilling-a-0-8b-tool-calling-agent/train_unsloth.py \
   --backend cuda \
-  --model unsloth/Qwen3.5-0.8B \
+  --model unsloth/Qwen3.5-2B \
   --train-path outputs/gpt_5_5_medium_sql_agent_train_frozen_current.jsonl \
-  --output-dir outputs/qwen3_5_0_8b_sql_agent_sft_cuda_gpt55_653rows_3072_2epoch_lr5e-5_r16 \
-  --max-seq-length 3072 \
+  --output-dir outputs/qwen3_5_2b_sql_agent_sft_cuda_gpt55_1046rows_4096_3epoch_lr5e-5_r32 \
+  --max-seq-length 4096 \
   --batch-size 1 \
   --grad-accum 8 \
   --learning-rate 5e-5 \
-  --lora-rank 16 \
-  --lora-alpha 16 \
-  --max-steps 146
+  --lora-rank 32 \
+  --lora-alpha 32 \
+  --max-steps 372
 ```
 
 ## 7. Evaluate The Tuned Student
@@ -626,8 +663,8 @@ On NVIDIA, evaluate the saved HF/PEFT adapter directly:
 
 ```bash
 python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent_local.py \
-  --model unsloth/Qwen3.5-0.8B \
-  --adapter-path outputs/qwen3_5_0_8b_sql_agent_sft_cuda_gpt55_653rows_3072_2epoch_lr5e-5_r16/adapter \
+  --model unsloth/Qwen3.5-2B \
+  --adapter-path outputs/qwen3_5_2b_sql_agent_sft_cuda_gpt55_1046rows_4096_3epoch_lr5e-5_r32/adapter \
   --data-dir data/sql_agent_bird_critic \
   --partition eval \
   --max-seq-length 8192 \
@@ -636,7 +673,7 @@ python 1-distilling-a-0-8b-tool-calling-agent/eval_sql_agent_local.py \
   --task-timeout-seconds 180 \
   --temperature 0.0 \
   --dtype bf16 \
-  --output outputs/qwen3_5_0_8b_sql_agent_sft_cuda_gpt55_653rows_3072_2epoch_eval.json
+  --output outputs/qwen3_5_2b_sql_agent_sft_cuda_gpt55_1046rows_4096_3epoch_lr5e-5_r32_eval.json
 ```
 
 Use the same command without `--adapter-path` for the non-finetuned baseline.
@@ -645,10 +682,10 @@ vLLM serving is still the right path when we need OpenAI-compatible serving, LoR
 
 ```bash
 python -m vllm.entrypoints.openai.api_server \
-  --model unsloth/Qwen3.5-0.8B \
+  --model unsloth/Qwen3.5-2B \
   --enable-lora \
-  --lora-modules sql_agent=outputs/qwen3_5_0_8b_sql_agent_sft_cuda_gpt55_653rows_3072_2epoch_lr5e-5_r16/adapter \
-  --served-model-name qwen3_5_0_8b_sql_agent \
+  --lora-modules sql_agent=outputs/qwen3_5_2b_sql_agent_sft_cuda_gpt55_1046rows_4096_3epoch_lr5e-5_r32/adapter \
+  --served-model-name qwen3_5_2b_sql_agent \
   --port 8094
 ```
 
@@ -661,10 +698,15 @@ Current frozen-run eval split: `220` tasks from `data/sql_agent_bird_critic/eval
 | GPT 5.5 medium teacher | 115/220 = 52.3% | 220 | 0 | 0 | OpenAI-compatible ChatGPT shim, reasoning effort `medium` |
 | Qwen3.5-0.8B base | 1/220 = 0.5% | 1 | 11 | 208 | `unsloth/Qwen3.5-0.8B`, no adapter |
 | Qwen3.5-0.8B SFT | 44/220 = 20.0% | 204 | 12 | 4 | 653-row GPT teacher data, 3072-token filter |
+| Qwen3.5-0.8B SFT | 44/220 = 20.0% | 204 | 6 | 10 | 1046-row GPT teacher data, 4096-token filter, r32 |
+| Qwen3.5-0.8B SFT | 38/220 = 17.3% | 199 | 9 | 11 | 1046-row data with `submit_sql` rows duplicated once; negative result |
 | Qwen3.5-2B base | 0/220 = 0.0% | 1 | 0 | 219 | `unsloth/Qwen3.5-2B`, no adapter |
-| Qwen3.5-2B SFT | 55/220 = 25.0% | 189 | 9 | 22 | Same data/config as 0.8B |
+| Qwen3.5-2B SFT | 55/220 = 25.0% | 189 | 9 | 22 | 653-row GPT teacher data, 3072-token filter, r16 |
+| Qwen3.5-2B SFT | 62/220 = 28.2% | 196 | 13 | 11 | 653-row GPT teacher data, 4096-token filter, r32 |
+| Qwen3.5-2B SFT | 57/220 = 25.9% | 206 | 5 | 9 | 1046-row GPT teacher data, 4096-token filter, r32 |
+| LFM2.5-8B-A1B SFT | 47/220 = 21.4% | 186 | 7 | 27 | 1046-row GPT teacher data, 4096-token filter, r32, eager MoE experts, no in-loop validation |
 
-The main measured effect is harness control: base Qwen students mostly repeat actions and almost never submit. SFT teaches them to interact with the harness and submit, but SQL correctness still trails the GPT teacher by a wide margin.
+The main measured effect is harness control: base Qwen students mostly repeat actions and almost never submit. SFT teaches them to interact with the harness and submit, but SQL correctness still trails the GPT teacher by a wide margin. The 1046-row Qwen3.5-0.8B run improved validation loss and submission rate, but not held-out task success. Duplicating `submit_sql` rows was a clean class-weighting experiment, but it made the 0.8B model worse: it lost 17 previously-correct tasks, gained 11 new correct tasks, and increased SQL execution errors. LFM2.5-8B-A1B also did not beat the smaller Qwen3.5-2B run on this harness.
 
 Ignored local artifacts:
 
@@ -672,14 +714,25 @@ Ignored local artifacts:
 outputs/gpt_5_5_medium_sql_agent_eval_220_timeout180.json
 outputs/remote_eval_results/qwen3_5_0_8b_base_eval_full_ctx8192_maxnew512_timeout180.json
 outputs/remote_eval_results/qwen3_5_0_8b_sql_agent_sft_cuda_gpt55_653rows_3072_2epoch_eval_full_ctx8192_maxnew512_timeout180_pyfix.json
+outputs/remote_eval_results/qwen3_5_0_8b_sql_agent_sft_cuda_gpt55_1046rows_4096_3epoch_lr5e-5_r32_eval_full_ctx8192_maxnew512_timeout180.json
+outputs/remote_eval_results/qwen3_5_0_8b_sql_agent_sft_cuda_gpt55_1492rows_submit2x_4096_3epoch_lr5e-5_r32_rootcache_eval_full_ctx8192_maxnew512_timeout180.json
+outputs/remote_eval_results/lfm2_5_8b_a1b_sql_agent_sft_cuda_gpt55_1046rows_4096_3epoch_lr5e-5_r32_eager_noeval_eval_full_ctx8192_maxnew512_timeout180.json
 outputs/remote_eval_results/qwen3_5_2b_base_eval_full_ctx8192_maxnew512_timeout180.json
 outputs/remote_eval_results/qwen3_5_2b_sql_agent_sft_cuda_gpt55_653rows_3072_2epoch_eval_full_ctx8192_maxnew512_timeout180.json
+outputs/remote_eval_results/qwen3_5_2b_sql_agent_sft_cuda_gpt55_653rows_4096_3epoch_lr5e-5_r32_eval_full_ctx8192_maxnew512_timeout180.json
+outputs/remote_eval_results/qwen3_5_2b_sql_agent_sft_cuda_gpt55_1046rows_4096_3epoch_lr5e-5_r32_eval_full_ctx8192_maxnew512_timeout180_tmpdirdevshm.json
 outputs/remote_training_artifacts/qwen3_5_0_8b_sql_agent_sft_cuda_gpt55_653rows_3072_2epoch_lr5e-5_r16/
+outputs/remote_training_artifacts/qwen3_5_0_8b_sql_agent_sft_cuda_gpt55_1046rows_4096_3epoch_lr5e-5_r32/
+outputs/remote_training_artifacts/qwen3_5_0_8b_sql_agent_sft_cuda_gpt55_1492rows_submit2x_4096_3epoch_lr5e-5_r32_rootcache/
 outputs/remote_training_artifacts/qwen3_5_2b_sql_agent_sft_cuda_gpt55_653rows_3072_2epoch_lr5e-5_r16/
+outputs/remote_training_artifacts/qwen3_5_2b_sql_agent_sft_cuda_gpt55_653rows_4096_3epoch_lr5e-5_r32/
+outputs/remote_training_artifacts/qwen3_5_2b_sql_agent_sft_cuda_gpt55_1046rows_4096_3epoch_lr5e-5_r32/
+outputs/remote_training_artifacts/lfm2_5_8b_a1b_sql_agent_sft_cuda_gpt55_1046rows_4096_3epoch_lr5e-5_r32_eager_noeval/
 ```
 
 ## Next Fixes
 
 - Improve teacher trace quality and coverage before increasing model size again.
-- Compare `4096` context training because it keeps 650/653 rows instead of 611/653.
-- Try stronger student candidates only after the data/prompt failure analysis shows the remaining errors are model capacity, not bad supervision.
+- Keep enough checkpoints, or save the best checkpoint explicitly, before relying on validation loss for early stopping. The submit-weighted run's best validation checkpoint was deleted by `save_total_limit=2`.
+- Inspect remaining failed traces to separate SQL-reasoning misses from harness-control misses before changing the model or LoRA recipe again.
+- Avoid more action-level reweighting until failure analysis shows it addresses correctness rather than just shifting tool-call frequencies.

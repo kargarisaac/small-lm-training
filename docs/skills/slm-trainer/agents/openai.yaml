@@ -1,0 +1,4 @@
+interface:
+  display_name: "SLM Trainer"
+  short_description: "Run clean SLM distillation experiments."
+  default_prompt: "Use this skill to plan and debug a small-language-model distillation or fine-tuning run with clean data, harness parity, reproducible configs, and honest eval reporting."

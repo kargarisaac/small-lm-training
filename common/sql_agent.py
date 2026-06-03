@@ -251,9 +251,10 @@ def run_task_with_timeout(
     generate: Generate,
     max_turns: int = 8,
     timeout_seconds: float = 0.0,
+    keep_messages: bool = False,
 ) -> dict[str, Any]:
     if timeout_seconds <= 0:
-        return run_task(row, data_dir=data_dir, generate=generate, max_turns=max_turns)
+        return run_task(row, data_dir=data_dir, generate=generate, max_turns=max_turns, keep_messages=keep_messages)
 
     def raise_timeout(_signum: int, _frame: Any) -> None:
         raise TimeoutError(f"task exceeded {timeout_seconds:g}s")
@@ -261,7 +262,7 @@ def run_task_with_timeout(
     previous_handler = signal.signal(signal.SIGALRM, raise_timeout)
     signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
     try:
-        return run_task(row, data_dir=data_dir, generate=generate, max_turns=max_turns)
+        return run_task(row, data_dir=data_dir, generate=generate, max_turns=max_turns, keep_messages=keep_messages)
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous_handler)

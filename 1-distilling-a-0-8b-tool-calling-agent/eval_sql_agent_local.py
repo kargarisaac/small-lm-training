@@ -19,8 +19,10 @@ from common import config as cfg
 from common import sql_agent
 
 
-def load_model(model_name: str, adapter_path: Path | None, max_seq_length: int, dtype: str) -> tuple[Any, Any]:
+def load_model(model_name: str, adapter_path: Path | None, max_seq_length: int, dtype: str, experts_implementation: str | None) -> tuple[Any, Any]:
     torch_dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[dtype]
+    if adapter_path is not None and not adapter_path.exists():
+        raise FileNotFoundError(f"Missing adapter path: {adapter_path}")
     tokenizer_source = adapter_path if adapter_path is not None else model_name
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_source, trust_remote_code=True)
     if tokenizer.pad_token is None:
@@ -34,6 +36,14 @@ def load_model(model_name: str, adapter_path: Path | None, max_seq_length: int, 
     )
     if adapter_path is not None:
         model = PeftModel.from_pretrained(model, adapter_path)
+    if experts_implementation is not None:
+        expert_configs = {}
+        for module in model.modules():
+            config = getattr(module, "config", None)
+            if config is not None and hasattr(config, "_experts_implementation"):
+                expert_configs[id(config)] = config
+        for config in expert_configs.values():
+            config._experts_implementation = experts_implementation
     model.eval()
     if hasattr(model.config, "max_position_embeddings"):
         model.config.max_position_embeddings = max(max_seq_length, int(model.config.max_position_embeddings or 0))
@@ -93,6 +103,7 @@ def main() -> None:
     parser.add_argument("--max-seq-length", type=int, default=cfg.SFT_MAX_SEQ_LENGTH)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--dtype", choices=["bf16", "fp16", "fp32"], default="bf16")
+    parser.add_argument("--experts-implementation", choices=["eager", "batched_mm", "grouped_mm"], default=None)
     parser.add_argument("--task-timeout-seconds", type=float, default=0.0)
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
@@ -109,9 +120,10 @@ def main() -> None:
     print("Harness LLM call path: local HF/PEFT model with BAML-rendered messages", flush=True)
     print("Model:", args.model, flush=True)
     print("Adapter:", args.adapter_path or "(none)", flush=True)
+    print("Experts implementation:", args.experts_implementation or "(model default)", flush=True)
     print("Rows:", len(rows), flush=True)
     print("Max turns:", args.max_turns, flush=True)
-    model, tokenizer = load_model(args.model, args.adapter_path, args.max_seq_length, args.dtype)
+    model, tokenizer = load_model(args.model, args.adapter_path, args.max_seq_length, args.dtype, args.experts_implementation)
     generate = make_local_generator(
         model=model,
         tokenizer=tokenizer,

@@ -8,12 +8,24 @@ cd "$REPO_ROOT"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 VENV_DIR="${VENV_DIR:-.venv}"
 SFT_PATH="${SFT_PATH:-outputs/gpt_5_5_medium_sql_agent_train_frozen_current.jsonl}"
-VERIFY_MAX_SEQ_LENGTH="${VERIFY_MAX_SEQ_LENGTH:-3072}"
+VERIFY_MODEL="${VERIFY_MODEL:-unsloth/Qwen3.5-2B}"
+VERIFY_MAX_SEQ_LENGTH="${VERIFY_MAX_SEQ_LENGTH:-4096}"
 VERIFY_LIMIT="${VERIFY_LIMIT:-16}"
 VERIFY_TRAIN_STEPS="${VERIFY_TRAIN_STEPS:-0}"
 SKIP_INSTALL="${SKIP_INSTALL:-0}"
 SKIP_DB_DOWNLOAD="${SKIP_DB_DOWNLOAD:-0}"
 SFT_DATA_URL="${SFT_DATA_URL:-}"
+RUNTIME_TMP_DIR="${RUNTIME_TMP_DIR:-/dev/shm/sql-agent-tmp}"
+CACHE_ROOT="${CACHE_ROOT:-/dev/shm/sql-agent-cache}"
+
+mkdir -p "$RUNTIME_TMP_DIR" "$CACHE_ROOT"
+export TMPDIR="${TMPDIR:-$RUNTIME_TMP_DIR}"
+export HF_HOME="${HF_HOME:-$CACHE_ROOT/hf}"
+export HF_HUB_CACHE="${HF_HUB_CACHE:-$HF_HOME/hub}"
+export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_HOME/transformers}"
+export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-$REPO_ROOT/.triton-cache}"
+export PIP_CACHE_DIR="${PIP_CACHE_DIR:-$CACHE_ROOT/pip}"
+mkdir -p "$HF_HUB_CACHE" "$TRANSFORMERS_CACHE" "$TRITON_CACHE_DIR" "$PIP_CACHE_DIR"
 
 echo "Repo: $REPO_ROOT"
 echo "Python: $($PYTHON_BIN --version)"
@@ -40,9 +52,6 @@ fi
 source "$VENV_DIR/bin/activate"
 
 if [[ "$SKIP_INSTALL" != "1" ]]; then
-  export PIP_CACHE_DIR="${PIP_CACHE_DIR:-/tmp/pip-cache}"
-  mkdir -p "$PIP_CACHE_DIR"
-
   python -m pip install --upgrade pip setuptools wheel
   python -m pip install --index-url https://download.pytorch.org/whl/cu128 \
     "torch==2.8.0+cu128" \
@@ -145,6 +154,7 @@ PY
 
 python 1-distilling-a-0-8b-tool-calling-agent/train_unsloth.py \
   --backend cuda \
+  --model "$VERIFY_MODEL" \
   --train-path "$SFT_PATH" \
   --output-dir outputs/cuda_setup_verify \
   --limit "$VERIFY_LIMIT" \
@@ -155,6 +165,7 @@ python 1-distilling-a-0-8b-tool-calling-agent/train_unsloth.py \
 if [[ "$VERIFY_TRAIN_STEPS" != "0" ]]; then
   python 1-distilling-a-0-8b-tool-calling-agent/train_unsloth.py \
     --backend cuda \
+    --model "$VERIFY_MODEL" \
     --train-path "$SFT_PATH" \
     --output-dir outputs/cuda_setup_verify \
     --limit "$VERIFY_LIMIT" \
@@ -170,12 +181,13 @@ echo
 echo "Next real training command:"
 echo "python 1-distilling-a-0-8b-tool-calling-agent/train_unsloth.py \\"
 echo "  --backend cuda \\"
+echo "  --model unsloth/Qwen3.5-2B \\"
 echo "  --train-path $SFT_PATH \\"
-echo "  --output-dir outputs/qwen3_5_0_8b_sql_agent_sft_cuda_gpt55_653rows_3072_2epoch_lr5e-5_r16 \\"
-echo "  --max-seq-length 3072 \\"
+echo "  --output-dir outputs/qwen3_5_2b_sql_agent_sft_cuda_gpt55_1046rows_4096_3epoch_lr5e-5_r32 \\"
+echo "  --max-seq-length 4096 \\"
 echo "  --batch-size 1 \\"
 echo "  --grad-accum 8 \\"
 echo "  --learning-rate 5e-5 \\"
-echo "  --lora-rank 16 \\"
-echo "  --lora-alpha 16 \\"
-echo "  --max-steps 146"
+echo "  --lora-rank 32 \\"
+echo "  --lora-alpha 32 \\"
+echo "  --max-steps 372"
